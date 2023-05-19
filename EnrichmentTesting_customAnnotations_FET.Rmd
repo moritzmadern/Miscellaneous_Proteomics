@@ -1,0 +1,197 @@
+29. April 2021
+Gina Method comparison
+Script for calculating enrichment (Fisher Exact testing) in K-means clusters
+
+
+```{r load packages}
+library(ggplot2)
+
+```
+
+
+```{r read in data and find cluster column}
+
+# read in data
+file <- "C:\\Users\\Moritz\\Desktop\\Other_R_stuff\\Gina_Method_comparison_enrichment_testing\\Moritz_matrix_merged_proteingroups.txt"
+df <- read.delim(file=file, header=TRUE, sep="\t", stringsAsFactors = FALSE)
+names(df)
+dim(df)
+
+# remove contaminants
+df <- df[!df$Potential.contaminant=="+",]
+
+# remove proteins that were filtered away by Cassiopeia valid value filter
+df <- df[!df$Valid.Values.Filter..removed.=="+",]
+dim(df)
+
+# find and save cluster column
+clusters <- as.character(df$k.Means.Cluster)
+summary(clusters)
+
+# plot cluster sizes
+ggplot(data=df) +
+  geom_bar(aes(x=k.Means.Cluster, fill=factor(k.Means.Cluster))) +
+  ggtitle("cluster sizes")
+```
+
+
+```{r Find relevant columns}
+
+# write function that detects if vector is character and only contains "+" or ""
+detect_columns <- function(x, allowed_entries=c("+","", " ", NA)){
+  
+  if (!is.character(x)){
+    return(FALSE)
+  } else {
+    if ( all(x %in% allowed_entries)){
+      return(TRUE)
+    } else { return(FALSE)}
+  }
+}
+
+# apply functions on columns of df
+relevant_columns_bool <- sapply(df, FUN=detect_columns)
+
+# print column names
+relevant_columns <- colnames(df)[relevant_columns_bool]
+
+# remove colnames that were mistaken as relevant columns
+relevant_columns <- relevant_columns[!relevant_columns %in% c("Potential.contaminant", "Only.identified.by.site", "Valid.Values.Filter..removed.")]
+print(relevant_columns)
+
+# inspect entries of a few columns
+table(df$comp_Actin_filaments)
+table(df$Q1.copies)
+table(df$Helices)
+
+# extract relevant columns as seperate df
+df_col <- df[,colnames(df) %in% relevant_columns]
+dim(df_col)
+
+
+```
+
+
+
+```{r calculate enrichment of categories in clusters}
+
+sign = "+"
+data_frame = df_col
+clusters = clusters
+n = "comp_Cytosol"
+k="4"
+
+
+# write function that calculates enrichment factors + fishers exact test for every category(relevant column) in every k-means Kluster
+calculate_enrichment <- function(data_frame, clusters, sign = "+") {
+  
+  
+  # make sure that clusters is saved as character vector
+  clusters <- as.character(clusters)
+
+  # extract relevant info
+  names_category <- colnames(data_frame)
+  names_cluster <- names(table(clusters))
+  n_nr <- length(names_category)
+  k_nr <- length(names_cluster)
+  names_cluster
+  names_category
+  n_nr
+  k_nr
+  
+  # initiate output matrices
+  m_observedNumbers <- matrix(numeric(n_nr*k_nr), ncol=k_nr, nrow=n_nr, dimnames = list(names_category,names_cluster))
+  m_expectedNumbers <- matrix(numeric(n_nr*k_nr), ncol=k_nr, nrow=n_nr, dimnames = list(names_category,names_cluster))
+  m_observedPercent <- matrix(numeric(n_nr*k_nr), ncol=k_nr, nrow=n_nr, dimnames = list(names_category,names_cluster))
+  m_expectedPercent <- matrix(numeric(n_nr*k_nr), ncol=k_nr, nrow=n_nr, dimnames = list(names_category,names_cluster))
+  m_enrichmentFactor <- matrix(numeric(n_nr*k_nr), ncol=k_nr, nrow=n_nr, dimnames = list(names_category,names_cluster))
+  m_pVal <- matrix(numeric(n_nr*k_nr), ncol=k_nr, nrow=n_nr, dimnames = list(names_category,names_cluster))
+  
+  # calculate cluster size for each cluster
+  cluster_size <- table(clusters)
+  
+  
+  
+  # fill matrices by going over every category and every cluster
+  for (n in names_category){
+  
+    # extract binary column. Make sure it is coded binary ("+" and "")
+    col_n <- data_frame[,n]
+    col_n <- ifelse(col_n == sign, yes="+", no="")
+    
+    # calculate observed numbers of category n in each cluster (i.e. how many "+" fall into each cluster)
+    observedNumbers_n <- tapply(col_n == "+",FUN=sum, INDEX = clusters )
+    observedNumbers_n
+    m_observedNumbers[n,] <- observedNumbers_n
+    
+    # calculate observed percent of category n in each cluster
+    observedPercent_n <- observedNumbers_n/cluster_size*100
+    observedPercent_n
+    m_observedPercent[n,] <- observedPercent_n
+    
+    # calculate expected percent of category n in each cluster
+    expectedPercent_n <- sum(col_n == "+")/length(col_n)
+    expectedPercent_n
+    m_expectedPercent[n,] <- expectedPercent_n
+    
+    # calculate expected number of category n in each cluster
+    expectedNumbers_n <- expectedPercent_n*cluster_size
+    expectedNumbers_n
+    m_expectedNumbers[n,] <- expectedNumbers_n
+    
+    # calculate enrichment factor as observed number/expected number
+    enrichmentFactor_n <- observedNumbers_n/expectedNumbers_n
+    enrichmentFactor_n
+    m_enrichmentFactor[n,] <- enrichmentFactor_n
+    
+    
+    
+    # test for enrichment of proteins with category n in cluster via fisha exact test
+    for (k in names_cluster){
+      
+      # which proteins are in cluster k, which proteins are in category n
+      bool_cluster_k <- clusters == k
+      bool_category_n <- col_n == "+"
+      
+      # now calculate the values of our contingency table. rows correspond to category n (yes/no) and columns to cluster k (yes/no)
+      table(data.frame(bool_category_n, bool_cluster_k))
+      n_k <- sum(bool_category_n & bool_cluster_k )
+      n_k
+      not.n_k <- sum(!bool_category_n & bool_cluster_k)
+      not.n_k
+      n_not.k <- sum(bool_category_n & !bool_cluster_k)
+      n_not.k
+      not.n_notk <- sum(!bool_category_n & !bool_cluster_k)
+      not.n_notk
+      cont_table <- matrix(c(n_k, not.n_k, n_not.k, not.n_notk), dimnames = list(c(TRUE,FALSE), c("+","")), nrow=2, byrow = FALSE)
+      cont_table
+      
+      # calculate the fisher's exact test and extract p-values
+      res_test <- fisher.test(x=cont_table, alternative = "greater")
+      m_pVal[n,k] <- res_test$p.value
+    }
+  }
+  
+  return(list(
+    m_observedNumbers = m_observedNumbers,
+    m_observedPercent = m_observedPercent,
+    m_expectedNumbers = m_expectedNumbers,
+    m_expectedPercent = m_expectedPercent,
+    m_enrichmentFactor = m_enrichmentFactor,
+    m_pVal=m_pVal))
+}
+
+result <- calculate_enrichment(data_frame = df_col, clusters = clusters)
+result
+
+
+# export tables as tab-separated text file
+write.table(result[["m_observedNumbers"]], file= "observedNumbers.txt", sep="\t", col.names=NA, row.names=TRUE, quote=FALSE)
+write.table(result[["m_observedPercent"]], file= "observedPercent.txt", sep="\t", col.names=NA, row.names=TRUE, quote=FALSE)
+write.table(result[["m_expectedPercent"]], file= "expectedPercent.txt", sep="\t", col.names=NA, row.names=TRUE, quote=FALSE)
+write.table(result[["m_expectedNumbers"]], file= "expectedNumbers.txt", sep="\t", col.names=NA, row.names=TRUE, quote=FALSE)
+write.table(result[["m_enrichmentFactor"]], file= "enrichmentFactor.txt", sep="\t", col.names=NA, row.names=TRUE, quote=FALSE)
+write.table(result[["m_pVal"]], file= "pVal.txt", sep="\t", col.names=NA, row.names=TRUE, quote=FALSE)
+
+```
+

@@ -1,0 +1,63 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2580
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww10800\viewh8400\viewkind0
+\pard\tx566\tx1133\tx1700\tx2267\tx2834\tx3401\tx3968\tx4535\tx5102\tx5669\tx6236\tx6803\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 ### PCA plot function ###\
+PCA_plot <- function(m, groups, samplenames, batch, legend_colors, plot_path=NULL)\{\
+  \
+  # load package\
+  library(ggplot2)\
+  library(plotly)\
+\
+  # replace NAs with 0\
+  m[is.na(m)] <- 0\
+  \
+  # calculate PCA\
+  pca_res <- prcomp(t(m))\
+  rot_mat <- pca_res$rotation\
+  res_final <- as.matrix(scale(t(m), center=TRUE, scale=FALSE)) %*% rot_mat\
+  eigenvectors <- pca_res$sdev^2\
+  anteil_var_pca1 <- round(eigenvectors[1]/sum(eigenvectors),digits=3)\
+  anteil_var_pca2 <- round(eigenvectors[2]/sum(eigenvectors),digits=3)\
+  \
+  ## create groups\
+  groups <- factor(groups, levels=names(legend_colors))\
+  colors <- legend_colors\
+  names(colors) <- levels(groups)\
+  colors <- colors[names(colors) %in% groups]\
+  \
+  ## ggplot PCR\
+  if(is.null(batch))\{\
+    df_gg <- as.data.frame(res_final)\
+    df_gg$samplenames <- samplenames\
+    df_gg$groups <- groups\
+    gg <- ggplot(df_gg) + \
+      geom_point(aes(x=PC1, y=PC2, col=groups, text=samplenames),size=5) +\
+      scale_color_manual(values=colors)+\
+      xlab(paste0("PC1  ","(",anteil_var_pca1*100,"%",")")) +\
+      ylab(paste0("PC2  ","(",anteil_var_pca2*100,"%",")")) +\
+      theme_bw()\
+  \} else \{\
+    df_gg <- as.data.frame(res_final)\
+    df_gg$samplenames <- samplenames\
+    df_gg$groups <- groups\
+    df_gg$batch <- as.factor(batch)\
+    gg <- ggplot(df_gg) + \
+      geom_point(aes(x=PC1, y=PC2, col=groups, text=samplenames, shape=batch),size=5) +\
+      scale_color_manual(values=colors)+\
+      xlab(paste0("PC1  ","(",anteil_var_pca1*100,"%",")")) +\
+      ylab(paste0("PC2  ","(",anteil_var_pca2*100,"%",")")) +\
+      theme_bw()\
+  \}\
+  \
+  # save plot\
+  if(!is.null(plot_path))\{\
+    ggsave(plot=gg, filename=plot_path, width = 6, height = 4)\
+  \}\
+  \
+  # print plot\
+  ggplotly(gg)\
+\}}

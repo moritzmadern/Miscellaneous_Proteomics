@@ -1,0 +1,783 @@
+---
+title: "Clustering: T-cell activation Phosphorylome"
+author: "Moritz Madern"
+
+output:
+  html_document: 
+    toc: true
+    theme: united
+  pdf_document:
+   toc: yes  
+---
+<br><br><br>
+
+
+
+```{r load packages etc.,  echo = FALSE, message = FALSE, warning = FALSE}
+
+## Load packages
+library(tidyverse)
+library(sva)
+library(clusterProfiler)
+library(enrichplot)
+library(DOSE)
+library(org.Mm.eg.db)
+library(gprofiler2)
+library(rlist)
+library(plotly)
+library(RColorBrewer)
+library(WGCNA)
+library(cluster)
+library(RColorBrewer)
+
+## Other things
+mouse <- org.Mm.eg.db
+
+```
+
+# Parameters
+
+```{r set parameters}
+
+
+### 1) Specify general parameters
+
+
+## Specify filepath to site table (should already be filtered etc. and contain intensity columns ready to be clustered)
+filepath_sites = "/Users/Moritz/Documents/Ashley_time_series/16plex_timeSeries_Ashley/Acetylome/Results/AcetylSites_SiteToProtein_TcellActivation.txt"
+
+
+## Specify filepath to proteinGroups table (used as part of the background in enrichment testing)
+filepath_proteinGroups = "/Users/Moritz/Documents/Ashley_time_series/16plex_timeSeries_Ashley/Proteome/Results/aggregated_proteinGroups.txt"
+
+## Specify pattern of quantitative columns
+pattern_quant <- "__siteToProtein_IFadjust"
+
+## Specify sample groups 
+groups = c("naive", "naive", "naive", 
+           "30m","30m", "30m",
+           "2h", "2h", "2h",
+           "8h", "8h", "8h",
+           "24h", "24h", "24h")
+
+## Specify new sample names. If existing sample column names are to be taken, specify as NULL. Specified samplenames have to match inoput order in the table.Note: Make sure that those sample names do not already belong to other column names in you table!
+samplenames = c("naive.1", "naive.2", "naive.3", 
+                "30m.1","30m.2", "30m.3",
+                "2h.1", "2h.2", "2h.3",
+                "8h.1", "8h.2", "8h.3",
+                "24h.1", "24h.2", "24h.3")
+
+## Specify unique group colors (character vector with names that match group names)
+colors_groups <- setNames(brewer.pal(n=length(unique(groups)), "YlGnBu"), nm=unique(groups))
+
+
+
+
+
+
+### 2) specify parameters specific to k-means clustering of data
+
+## Specify pearsons correlation coefficient threshold. Features with lower correlation to their respective cluster center will not be kicked out of their clusters.
+corr_threshold = 0.9
+
+
+## Specify ANOVAp-value threshold for filtering (1 way ANOVA, y ~ groups). Features lower p-values pass the filter
+adj.pval_threshold = 0.05
+
+## Specify maximum absolute log2 fold change for filtering (i.e. highest absolute log2 fold change across all groups). Features with maximum absolute log2 fold changes higher than the threshold pass the filter
+max_abs_log2_FC_threshold = log2(1.5) %>% abs()
+
+## Specify number of k-means clusters k
+k_kmeans= 5
+
+
+
+### 3) specify parameters specific to WGCNA clustering of data
+
+## specify soft threshold (power) beta for wgcna network construction
+wgcna_beta = 4
+
+
+
+
+### 4) specify parameters specific to gprofiler enrichment/overrepresentation analysis
+
+## specify which clusters should be tested for enrichment (possible input: "WGCNA", "kmeans", NULL) via overrepresentation analysis
+selected_clusters_ORA <- "WGCNA"
+
+
+## Specify filepath to proteinGroups table (used as part of the background in enrichment testing)
+filepath_proteinGroups = "/Users/Moritz/Documents/Ashley_time_series/16plex_timeSeries_Ashley/Proteome/Results/aggregated_proteinGroups_TcellActivation.txt"
+
+## Specify filepath to AcetylSites table (used as part of the background in enrichment testing)
+filepath_acetylSites = "/Users/Moritz/Documents/Ashley_time_series/16plex_timeSeries_Ashley/Acetylome/Results/aggregated_Acetyl (K)Sites.txt"
+
+## Specify filepath to PhosphoSites table (used as part of the background in enrichment testing)
+filepath_phosphoSites = "/Users/Moritz/Documents/Ashley_time_series/16plex_timeSeries_Ashley/Phosphorylome/Results/aggregated_Phospho (STY)Sites.txt"
+
+
+## define organism for enrichment analysis (note: "mmusculus" for mouse, "hsapiens" for human, etc)
+organism = "mmusculus"
+
+## define adj. pval-threshold for enrichment testing via g:Profiler
+pval_threshold_enrichment = 0.1
+
+## define the database sources from which annotated gene sets are tested for enrichment
+sources_enrichment = c("GO", "KEGG", "REAC")
+
+```
+
+
+```{r write required functions etc,  echo = FALSE, message = FALSE, warning = FALSE}
+
+## write functions that extracts summary statistics for all replicates within groups 
+extract_summaryStats <- function(m, groups, FUN="median"){
+  m <- m_log %>% as.matrix()
+  res_list <- lapply(split(m, seq(nrow(m))),  FUN=function(x){
+    res_summaryStat <- tapply(x, INDEX=groups, FUN=FUN, na.rm=TRUE)[unique(groups)]
+    return(res_summaryStat)
+  })
+  res <- do.call(what="rbind", args=res_list)
+  return(res)
+}
+
+
+## create folder "enrichment" storing gprofiler enrichment results
+if (!"enrichmentResults_ORA" %in% list.files("./Results")){
+  dir.create("./Results/enrichmentResults_ORA")
+}    
+
+
+## create folder geneLists storing genes name info per cluster
+if (!"Lists_kMeans" %in% list.files("./Results")){
+    dir.create("./Results/Lists_kMeans")
+}
+
+
+## create folder geneLists storing genes name info per cluster
+if (!"Lists_wgcna" %in% list.files("./Results")){
+    dir.create("./Results/Lists_wgcna")
+}
+
+```
+
+
+
+
+```{r read in data etc., echo = FALSE, message = FALSE, warning = FALSE}
+
+## Read in data etc
+df <- read.delim(file=filepath_sites, header=TRUE, sep="\t", check.names = FALSE)
+
+
+## Extract first gene name (if multiple, separated by ";". This is relevant for enrichment testing which only takes one as input)
+df$Gene.names_first <- df$Gene.names %>%  sapply(FUN=function(text){
+                                                        res <- sub(x=text, pattern=";.*$", replacement="")
+                                                        return(res)
+                                                    })
+
+```
+
+
+```{r Extract quantitative columns and subselect if wanted, echo = FALSE, message = FALSE, warning = FALSE}
+
+## Extract quantitative columns
+m <- df[,grepl(names(df), pattern=pattern_quant)] %>% as.matrix(.)
+rownames(m) <- df$unique.identifier
+
+
+## Extract non-quantitative columns (that do not match specified quantitative pattern)
+df_meta <- df[,!grepl(names(df), pattern=pattern_quant)]
+
+
+## If samplenames are specified, change column names to samplenames. Else, take existing column names as samplenames
+if(is.null(samplenames)){
+  samplenames <- colnames(m)
+} else {
+  colnames(m) <- samplenames
+}
+
+```
+
+<br><br><br><br>
+
+
+
+# Filtering based on ANOVA p-value
+
+```{r ANOVA and p-value-based filtering, echo = FALSE, message = FALSE, warning = FALSE, fig.align="center", fig.path='fig_kmeansClustering/', dev=c('png', 'pdf')}
+
+## Make copy, then replaces NAs with minimum value
+m_copy <- m
+m_copy[is.na(m_copy)] <- min(m_copy, na.rm=TRUE)
+
+
+## Calculate One-way anova for each row in m
+df_meta$ANOVApval <- apply(m_copy, MARGIN = 1, FUN=function(x){
+                      x <- as.numeric(x)
+                      res <- aov(x ~ groups)
+                      if (!is.null(summary(res)[[1]]$"Pr(>F)"[1])){
+                        return(summary(res)[[1]]$"Pr(>F)"[1]) 
+                      } else {return (NA)}
+                    })
+
+
+## Calculate adjusted ANOVA p-values
+df_meta$adj.ANOVApval <- p.adjust(p=df_meta$ANOVApval, method="BH")
+
+
+## Overview of p-values
+hist(df_meta$ANOVApval, breaks=20, col="grey", border="grey", main="ANOVA p-value histogramm", xlab="p-value")
+hist(df_meta$adj.ANOVApval, breaks=20, col="orange", border="orange", main="ANOVA adj. p-value histogramm", xlab="adj. p-value")
+
+
+## Perform filtering based on adj. p-value cutoff
+writeLines("Chosen adj. p-value threshold: ")
+print(adj.pval_threshold)
+writeLines("Number of rows (sites) before p-value filtering:")
+nrow(df_meta)
+bool_keep <- df_meta$adj.ANOVApval < adj.pval_threshold
+barplot(table(bool_keep), main="passing adj.ANOVA p-value threshold", col="grey", border="grey")
+bool_keep <- bool_keep
+df_meta <- df_meta[bool_keep,]
+m <- m[bool_keep,]
+writeLines("Number of rows (sites) after p-value filtering:")
+nrow(df_meta)
+
+```
+
+<br><br><br><br>
+
+# Filtering based on maximum absolute log2 median FC
+
+```{r filter for highly-differential features based on maximum absolute log2 median FC, echo = FALSE, message = FALSE, warning = FALSE, fig.align="center", fig.path='fig_kmeansClustering/', dev=c('png', 'pdf')}
+
+## Calculate maximum absolute log2 FC
+df_meta$max_abs_log2_FC <- apply(m, MARGIN = 1, FUN=function(x){
+                                                              x <- as.numeric(x)
+                                                                  res <- tapply(x, INDEX=groups, FUN=median) %>% log2() %>% abs() %>% max(., na.rm = TRUE)
+                                                                  return(res)
+                                                              })
+
+## Plot overview of maximum absolute log2 FC, as well as cutoff
+hist(df_meta$max_abs_log2_FC, breaks=50, xlab="maximum absolute log2 median FC", main="", border="grey", col="grey")
+abline(v=log2(1.25), col="red", lty="dashed", lwd=2)
+
+
+## Filter based on cutoff (determined in parameter section)
+writeLines("Chosen maximum absolute log2 median FC cutoff: ")
+print(max_abs_log2_FC_threshold)
+writeLines(paste0("Number of rows (sites) before filtering: ",nrow(df_meta)))
+bool_keep <- df_meta$max_abs_log2_FC > max_abs_log2_FC_threshold
+df_meta <- df_meta[bool_keep,]
+m <- m[bool_keep,]
+writeLines(paste0("Number of rows (sites) after filtering: ",nrow(df_meta)))
+
+```
+
+
+
+
+
+
+
+
+
+
+
+<br><br><br><br>
+
+# k-means clustering 
+
+Note that for the clustering, measurements for replicates within groups are summarized to a single summary-statistic (per default: median). That means that, if you have 5 groups of 3 replicates each, the clustering will be performed on the 5 group median values.
+
+### k-means: optimal k in k-means clustering
+
+
+```{r Optimal k, echo = FALSE, message = FALSE, warning = FALSE, fig.align="center", fig.path='Results/fig_kmeans/', dev=c('png', 'pdf')}
+
+## perform k-means clustering with different number of clusters. Plot sum of squares vs k.
+k_test <- 2:20
+N <- nrow(m)
+within_ss <- numeric(length(k_test))
+m_log <- log2(m)
+m_log[is.na(m_log)] <- quantile(m_log, probs=0.01, na.rm = TRUE)
+m_log_summ <- extract_summaryStats(m=m_log, groups=groups, FUN="median")
+
+
+names(within_ss) <- k_test
+for (k in k_test){
+  KM_k <- kmeans(m_log_summ,k ,iter.max = 10, nstart=10)
+  within_ss[as.character(k)] <- sum(KM_k$withinss)
+}
+
+
+## Plot sum of squares vs k
+writeLines("Empirically checking for optimal number of clusters (k) via elbow-plot :")
+par(mfrow=c(1,1))
+par(mgp=c(2.5,1,0))
+plot(y=within_ss,x=k_test,cex.main=0.8, cex.main=0.8,yaxt="n", xaxt="n", pch=16, ylab="", xlab="", type="n")
+points(y=within_ss,x=k_test, col="#E69F00", pch=16, cex=1.5)
+lines(y=within_ss,x=k_test, lty = 3)
+axis(side=2, cex.axis=0.6, mgp=c(0,0.7,0), las=2, lwd.ticks=0.5)
+axis(side=1, cex.axis=0.6, mgp=c(0,0.4,0), lwd.ticks=0.5, at=2:20)
+title(ylab="residual sum of squares", xlab="number of clusters k", main="Elbow-plot")
+
+```
+
+### k-means: clustering
+
+```{r kmeans clustering , echo = FALSE, message = FALSE, warning = FALSE, fig.align="center", fig.path='Results/fig_kmeans/', dev=c('png', 'pdf'), fig.width=4.5, fig.height=4}
+
+## Set seed
+set.seed(123)
+
+
+## Perform k-means clustering with specified k
+writeLines("Chosen k: ")
+print(k_kmeans)
+writeLines("Chosen minimum pearson correlation threshold: ")
+print(corr_threshold)
+
+
+##  Perform k-means clustering with chosen number of clusters k
+k <- k_kmeans
+m_log <- log2(m)
+m_log[is.na(m_log)] <- quantile(m_log, probs=0.01, na.rm = TRUE)
+m_log_summ <- extract_summaryStats(m=m_log, groups=groups, FUN="median")
+KM <- kmeans(m_log_summ, k, iter.max = 10, nstart=10)
+centers <- KM$centers
+clusters <- KM$cluster
+table_n <- table(clusters)
+m_log <- log2(m)
+
+
+## For each feature, calculate pearsons correlation coefficient to respective cluster center. Plot Histogram. Save value
+v_pearsonR <- numeric(nrow(m_log))
+for (i in 1:nrow(m_log_summ)){
+  
+  # extract cluster center of feature i
+  center_i <- centers[clusters[i],]
+  
+  # extract profile of feature i
+  m_i <- m_log_summ[i,]
+  
+  # calculate correlation
+  v_pearsonR[i] <- cor(x=center_i, m_i, method="pearson", use="pairwise.complete.obs")
+}
+writeLines("Chosen pearson correlation coefficient cutoff: ")
+print(corr_threshold)
+writeLines("Distribution of correlations between features and respective cluster centers:")
+hist(v_pearsonR, breaks=50, main="pearson correlation to cluster centers", xlab="pearsons r")
+abline(v=corr_threshold, col="red", lwd=2)
+df_meta$kMeans_pearsonR <- v_pearsonR
+
+
+## Kick out features that don't correlate well with their respective cluster center
+clusters[v_pearsonR < corr_threshold] <- 0
+
+
+## Give overview of cluster sizes
+writeLines("Overview of cluster sizes:")
+barplot(table(clusters), ylab="number", xlab="cluster label")
+writeLines("Note that cluster 0 contains all the features with correlations that did not pass the filter")
+
+
+## Prepare some variables for plotting
+par(mar=c(6.5,4.5,4,5))
+par(mgp=c(3,1,0))
+# min_y <- quantile(m_log, probs=0.001, na.rm = TRUE)
+# max_y <- quantile(m_log, probs=0.999, na.rm = TRUE)
+colors_kmeans <- colors_groups[unique(groups)]
+x_axis <- 1:ncol(centers)
+table_n <- table(clusters)
+
+
+## Go over each cluster and plot profiles
+for (i in 1:k){ 
+  
+  # plot cluster center + individual transcript abundance patterns
+  bool_i <- clusters == i
+  m_i <- m_log_summ[bool_i,, drop=FALSE]
+  ymin <- min(m_i, na.rm = TRUE) - 0.25
+  ymax <- max(m_i, na.rm = TRUE) + 0.25
+  plot(x_axis, centers[i,], xaxt="n", pch=16, ylab="", xlab="", ylim=c(ymin,ymax), main=paste0("K-Means \nCluster ",i, " (n=", table_n[as.character(i)], ")"), cex=1, type="n", yaxt="n", cex.main=0.9, cex.lab=2)
+  axis(side=1, labels=unique(groups), at=x_axis, cex.axis=0.65, las=2)
+  axis(side=2, cex.axis=0.8)
+  title(ylab="log2 site/protein ", cex.lab=0.9)
+  
+  # plot lines of all proteins
+  for(j in sample(1:nrow(m_i))){
+    lines(x_axis, m_i[j,], xaxt="n", xlab="", lty=1, col="black", lwd=0.1)
+  }
+  
+  # plot cluster centers
+  #points(x_axis, centers[i,] , xaxt="n", col=colors_kmeans, pch=16, ylab="", xlab="", cex=5)
+}
+
+## Add clusters to dataframe df_meta_centered
+df_meta$kmeans_cluster <- clusters
+
+```
+
+
+```{r Write gene name list for each k-means cluster, echo = FALSE, message = FALSE, warning = FALSE}
+
+## Create filepath
+wd <- getwd()
+cluster_filepath <- paste0(wd, "/Results/Lists_kMeans/")
+    
+
+## Create txt-file with gene names for each of the k clusters
+k <- max(df_meta$kmeans_cluster)
+for (i in 1:k){
+  filepath_GeneNames_k <- paste0(cluster_filepath, "/GeneNames_kMeansCluster_", i, ".txt")
+  filepath_SiteNames_k <- paste0(cluster_filepath, "/SiteNames_kMeansCluster_", i, ".txt")
+  filepath_ProteinNames_k <- paste0(cluster_filepath, "/ProteinNames_kMeansCluster_", i, ".txt")
+  write.table(unique(df_meta$Gene.names_first[df_meta$kmeans_cluster == i]), file=filepath_GeneNames_k, row.names = FALSE, col.names = FALSE, quote=FALSE)
+  write.table(unique(df_meta$unique_site_identifier[df_meta$kmeans_cluster == i]), file=filepath_SiteNames_k, row.names = FALSE, col.names = FALSE, quote=FALSE)
+  write.table(unique(df_meta$Leading.proteins[df_meta$kmeans_cluster == i]), file=filepath_ProteinNames_k, row.names = FALSE, col.names = FALSE, quote=FALSE)
+}
+
+```
+
+<br><br><br><br>
+
+# WGCNA clustering 
+
+Note that for the clustering, measurements for replicates within groups are summarized to a single summary-statistic (per default: median). That means that, if you have 5 groups of 3 replicates each, the clustering will be performed on the 5 group median values.
+
+### WGCNA: optimal soft threshold beta (power)
+
+```{r check soft threshold power (beta), echo = FALSE, message = FALSE, warning = FALSE, fig.align="center", fig.path='Results/fig_WGCNA/', dev=c('png', 'pdf')}
+
+## Set seed
+set.seed(123)
+
+
+## Print chosen parameters
+writeLines("Chosen power (beta): ")
+print(wgcna_beta)
+
+
+##  Prepare quantitative dataframe for wgcna package (needs to be transposed, i.e.: rows are samples/groups and columns are genes)
+par(mar=c(6.5,4.5,4,5))
+par(mgp=c(3,1,0))
+m_log <- log2(m)
+m_log[is.na(m_log)] <- quantile(m_log, probs=0.01, na.rm = TRUE)
+m_log_summ <- extract_summaryStats(m=m_log, groups=groups, FUN="median")
+df_expr <- t(m_log_summ) %>% as.data.frame()
+
+
+## probe different powers. Plot the results (scale-free topology model fit as well as median connectivity)
+powers <- 1:20
+sft <- pickSoftThreshold(df_expr, powerVector = powers, networkType = "signed")
+plot(x = sft$fitIndices$Power, y = -sign(sft$fitIndices$slope)*sft$fitIndices$SFT.R.sq,
+     xlab ="soft Threshold beta (power)", ylab = "Scale Free Topology Model Fit, signed R-squared", type="n" )
+text(x = sft$fitIndices$Power, y = -sign(sft$fitIndices$slope)*sft$fitIndices$SFT.R.sq, labels=powers, cex=0.9, col="red")
+plot(x = sft$fitIndices$Power, y = sft$fitIndices$median.k.,
+     xlab="soft threshold beta (power)", ylab = "median network connectivity", type="n")
+text(x = sft$fitIndices$Power, y = sft$fitIndices$median.k., labels=powers, cex=0.9, col="red")
+
+```
+
+
+Note: The autors advise choosing the lowest power for which the scale-free topology fit signed R-squared curve flattens upon reaching a high value (even if afterwards it increases again). Alternatively, where median connectivity starts to flatten/curve into a linear relationship (i.e. elbow). This beta then provides a network that most closely resembles a scale-free topology, i.e. where a few nodes undertake the major laod of connectivity.
+
+### WGCNA: construct network and obtain clusters
+
+Note: This clustering procedure is at core nothing else but a hyrarchical clustering based on an adjacency matrix, implementing an arbitrary cutoff for the tree.
+
+```{r WGCNA , echo = FALSE, message = FALSE, warning = FALSE, fig.align="center", fig.path='Results/fig_WGCNA/', dev=c('png', 'pdf'), fig.width=4.5, fig.height=4}
+
+## calculate network
+set.seed(123)
+net <- blockwiseModules(df_expr, power = wgcna_beta, minModuleSize = 10,
+                        numericLabels = TRUE, networkType = "signed", minKMEtoStay = 0.6)
+
+
+##  prepare some variables for plotting
+clusters <- net$colors
+m_centers <- matrix(ncol=nrow(df_expr), nrow=length(unique(net$colors)))
+colnames(m_centers) <- unique(groups)
+rownames(m_centers) <- sort(unique(clusters))
+v_pearsonR <- numeric(nrow(df_meta))
+
+
+## Go over each cluster and calculate cluster center
+for (i in sort(unique(clusters))){ 
+  
+  # plot cluster center + individual transcript abundance patterns
+  bool_i <- clusters == i
+  m_i <- m_log_summ[bool_i,, drop=FALSE]
+
+  ## calculate cluster center
+  m_centers[as.character(i),] <- colMeans(m_i, na.rm = TRUE)
+}
+
+
+## For each feature, calculate pearsons correlation coefficient to respective cluster center. Plot Histogram. Save value
+v_pearsonR <- numeric(nrow(df_meta))
+for (i in 1:nrow(m_log_summ)){
+  
+  # extract cluster center of feature i
+  center_i <- m_centers[as.character(clusters[i]),]
+  
+  # extract profile of feature i
+  m_i <- m_log_summ[i,]
+  
+  # calculate correlation
+  v_pearsonR[i] <- cor(x=center_i, m_i, method="pearson", use="pairwise.complete.obs")
+}
+writeLines("Chosen pearson correlation coefficient cutoff: ")
+print(corr_threshold)
+writeLines("Distribution of correlations between features and respective cluster centers:")
+hist(v_pearsonR, breaks=50, main="pearson correlation to cluster centers", xlab="pearsons r")
+abline(v=corr_threshold, col="red", lwd=2)
+df_meta$wgcna_pearsonR <- v_pearsonR
+
+
+## Kick out features that don't correlate well with their respective cluster center
+clusters[v_pearsonR < corr_threshold] <- 0
+
+
+## Overview of cluster sizes
+table_n <- table(clusters)
+writeLines("Overview of cluster sizes")
+table_n
+
+
+## Go over each cluster and plot profiles
+## Prepare some variables for plotting
+par(mar=c(6.5,4.5,4,5))
+par(mgp=c(3,1,0))
+for (i in sort(unique(clusters))){ 
+  
+  # plot cluster center + individual transcript abundance patterns
+  bool_i <- clusters == i
+  m_i <- m_log_summ[bool_i,, drop=FALSE]
+  ymin <- min(m_i, na.rm = TRUE) - 0.25
+  ymax <- max(m_i, na.rm = TRUE) + 0.25
+  plot(x_axis, m_i[1,], xaxt="n", pch=16, ylab="", xlab="", ylim=c(ymin,ymax), main=paste0("WGCNA \nCluster ",i, " (n=", table_n[as.character(i)], ")"), cex=1.5, type="n", yaxt="n", cex.main=0.9, cex.lab=2)
+  axis(side=1, labels=unique(groups), at=x_axis, cex.axis=0.65, las=2)
+  axis(side=2, cex.axis=0.8)
+  title(ylab="log2 site/protein ", cex.lab=0.9)
+  
+  ## calculate cluster center
+  m_centers[as.character(i),] <- colMeans(m_i, na.rm = TRUE)
+  
+  # plot lines of all proteins
+  for(j in sample(1:nrow(m_i))){
+    lines(x_axis, m_i[j,], xaxt="n", xlab="", lty=1, col="black", lwd=0.1)
+  }
+}
+
+## Add clusters to dataframe df_meta_centered
+df_meta$wgcna_cluster <- clusters
+
+```
+
+
+```{r Write gene name list for each wgcna cluster, echo = FALSE, message = FALSE, warning = FALSE}
+
+## Create filepath
+wd <- getwd()
+cluster_filepath <- paste0(wd, "/Results/Lists_wgcna/")
+    
+
+## Create txt-file with gene names for each of the k clusters
+k <- max(df_meta$kmeans_cluster)
+for (i in 1:k){
+  filepath_GeneNames_k <- paste0(cluster_filepath, "/GeneNames_wgcnaCluster_", i, ".txt")
+  filepath_SiteNames_k <- paste0(cluster_filepath, "/SiteNames_wgcnaCluster_", i, ".txt")
+  filepath_ProteinNames_k <- paste0(cluster_filepath, "/ProteinNames_wgcnaCluster_", i, ".txt")
+  write.table(unique(df_meta$Gene.names_first[df_meta$wgcna_cluster == i]), file=filepath_GeneNames_k, row.names = FALSE, col.names = FALSE, quote=FALSE)
+  write.table(unique(df_meta$unique_site_identifier[df_meta$wgcna_cluster == i]), file=filepath_SiteNames_k, row.names = FALSE, col.names = FALSE, quote=FALSE)
+  write.table(unique(df_meta$Leading.proteins[df_meta$wgcna_cluster == i]), file=filepath_ProteinNames_k, row.names = FALSE, col.names = FALSE, quote=FALSE)
+}
+
+```
+
+
+```{r  export final table, echo = FALSE, message = FALSE, warning = FALSE}
+
+
+write.table(df_meta,
+            file=paste0(wd,"/Results/ResultTable_Clustering.txt"), row.names = FALSE, col.names = FALSE, quote=FALSE, sep="\t")
+
+
+```
+
+<br><br><br><br>
+
+# Overrepresentation Analysis
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+## Perform Overrepresenation Analysis (ORAs) on the following clusters:
+writeLines("ORAs performed on the following clusters: ")
+print(selected_clusters_ORA)
+  
+```
+
+
+
+
+The next section performs overrepresentation analysis for the selected clustering ("WGCNA", "kmeans", NULL )
+
+### Visualization via Manhattan plots ("gProfiler2")
+
+
+```{r Perform enrichment analysis for each cluster using gprofiler2 (ORAs), echo = FALSE, message = FALSE, warning = FALSE}
+
+if (selected_clusters_ORA %in% c("WGCNA", "kmeans")){
+  
+  ## Create Gene name background (consisting of all proteins/genes in the proteinGroups, as well as site tables)
+  df_prot <- read.delim(filepath_proteinGroups, header=TRUE, sep="\t")
+  df_acet <- read.delim(filepath_acetylSites, header=TRUE, sep="\t")
+  df_phospho <- read.delim(filepath_phosphoSites, header=TRUE, sep="\t")
+  background_list_1 <- df_prot$Gene.names %>% sapply(FUN=function(text){
+                                                          res <- sub(x=text, pattern=";.*$", replacement="")
+                                                          return(res)
+                                                        }) %>% unique()
+  background_list_2 <- df_acet$Gene.names %>% sapply(FUN=function(text){
+                                                          res <- sub(x=text, pattern=";.*$", replacement="")
+                                                          return(res)
+                                                        }) %>% unique()
+  background_list_3 <- df_phospho$Gene.names %>% sapply(FUN=function(text){
+                                                          res <- sub(x=text, pattern=";.*$", replacement="")
+                                                          return(res)
+                                                        }) %>% unique()
+  background_list <- c(background_list_1,
+                       background_list_2,
+                       background_list_3) %>% unique()
+  
+  
+  ## Visualize overlap of all 3 gene sets that will make up background
+  if (!require(devtools)) install.packages("devtools")
+  devtools::install_github("yanlinlin82/ggvenn")
+  library(ggvenn)
+  a <- list(prot = background_list_1,
+            acet=background_list_2,
+            phos = background_list_3)
+  ggvenn(a)
+  
+  
+  ## prepare clusters table
+  if (selected_clusters_ORA == "WGCNA") df_clusters <- data.frame(GeneNames = df_meta$Gene.names, Clusters = df_meta$wgcna_cluster)
+  if (selected_clusters_ORA == "kmeans") df_clusters <- data.frame(GeneNames = df_meta$Gene.names, Clusters = df_meta$kmeans_cluster)
+  df_clusters$GeneNames <- df_clusters$GeneNames %>% sapply(FUN=function(text){
+                                                          res <- sub(x=text, pattern=";.*$", replacement="")
+                                                          return(res)
+                                                        }) 
+  
+  ## Initiate plot list
+  plot_list <- list()
+  
+  
+  ## For each cluster, perform enrichment analysis with gprofiler
+  for (i in 1:max(df_clusters$Clusters)){
+    
+    # define query list
+    query_list_i <- df_clusters$GeneNames[df_clusters$Clusters == i] %>% unique() %>% list()
+    names(query_list_i)  <- paste0(selected_clusters_ORA,"_cluster_",i)
+    if (length(query_list_i[[1]]) == 0 ) next
+    
+    # perform enrichment analysis using gost() function from gprofiler with custom background (i.e. all quantified genes in the experiment)
+    res_gost <- gost(query = query_list_i,
+                           organism = organism, ordered_query = FALSE,
+                           multi_query = FALSE, significant = TRUE, exclude_iea = TRUE,
+                           measure_underrepresentation = FALSE, evcodes = TRUE,
+                           user_threshold = pval_threshold_enrichment, correction_method = "fdr",
+                           custom_bg = background_list, domain_scope = "custom",
+                           numeric_ns = "", sources = sources_enrichment, as_short_link = FALSE)
+    
+    # store enrichment results as text file. But before: Calculate enrichment factor; get rid of intersection size 1 terms
+    wd <- getwd()
+    enrichment_filepath <- paste0(wd, "/Results/enrichmentResults_ORA")
+    if(!is.null(res_gost)){
+      enrichment_res_i <- res_gost$result
+      enrichment_res_i <- enrichment_res_i[!sapply(enrichment_res_i, FUN=is.list)]
+      enrichment_res_i$enrichment_factor <- (enrichment_res_i$intersection_size/enrichment_res_i$query_size)/(enrichment_res_i$term_size/enrichment_res_i$effective_domain_size)
+      enrichment_res_i$adj.p_value <- enrichment_res_i$p_value # according to the authors as well as the plot! Unfortunately the table does not specify it correctly.
+      enrichment_res_i <- enrichment_res_i[,c("term_name", "adj.p_value", "enrichment_factor", "effective_domain_size", "term_size", "query_size", "intersection_size", "term_id", "source", "intersection")]
+      enrichment_res_i <- enrichment_res_i %>%  filter(intersection_size > 1) %>% filter(term_size <5000)
+      write.table(enrichment_res_i, file=paste0(enrichment_filepath,"/",selected_clusters_ORA,"_cluster",i,".txt"), row.names = FALSE, col.names = TRUE, quote=FALSE, sep = "\t")
+    }
+  
+    # save enrichment results of cluster i as plot 
+    if (!is.null(res_gost)){
+      res_gost$result <- res_gost$result %>% filter(intersection_size > 1) %>% filter(term_size <5000)
+      if(nrow(res_gost$result) == 0){next}
+       p <- gostplot(res_gost, interactive = TRUE, capped=FALSE)
+       plot_list <- list.append(plot_list, ggplotly(p))
+    }
+  }
+}
+
+
+
+```
+
+Visualizing enrichment results as Manhattan plots (10% FDR cutoff):
+
+```{r Plot Manhattan plots, echo = FALSE, message = FALSE, warning = FALSE, fig.align="center", fig.height=5, fig.width=6, fig.path='Results/enrichmentResults_ORA/'}
+
+## plot the plots outside a loop
+par(mar=c(1,1,1,1))
+htmltools::tagList(setNames(plot_list, NULL))
+
+```
+
+
+### Visualization via enrichment maps ("clusterProfiler")
+
+Visualizing enrichment results as enrichment maps (10% FDR cutoff). Terms/Gene sets that share genes will appear connected (via edges) in the network. For each cluster, only the top 25 pathways are displayed.
+
+```{r Perform enrichment analysis for each cluster via clusterProfiler (ORAs) and plot enrichment maps, echo = FALSE, message = FALSE, warning = FALSE, fig.align="center", fig.height=10, fig.width=10, fig.path='Results/enrichmentResults_ORA/', dev=c('png', 'pdf')}
+
+## Convert background to entrez IDs
+background_list_entrez <- mapIds(mouse, keys = background_list, keytype = "SYMBOL", column = "ENTREZID", multiVals="first") %>% unlist() %>% na.omit() %>% unique()
+
+## convert gene names from df_clusters into entrez IDs
+df_clusters$ENTREZ <- mapIds(mouse, keys = df_clusters$GeneNames, keytype = "SYMBOL", column = "ENTREZID", multiVals="first") 
+
+## create list for clustering
+list_clusters <- list()
+for (i in 1:max(df_clusters$Clusters)){
+  
+  # filter for cluster i
+  df_clusters_i <- df_clusters %>% filter(Clusters == i)
+  
+  # extract unique ENTREZ ids for cluster i
+  ENTREZ_i <- mapIds(mouse, keys = df_clusters_i$GeneNames, keytype = "SYMBOL", column = "ENTREZID", multiVals="first") %>% na.omit() %>% unique()
+  
+  # store in list
+  list_clusters[[i]] <- ENTREZ_i
+  names(list_clusters)[i] <- paste0(selected_clusters_ORA, "_cluster",i)
+}
+
+## perform ORA against GO:MF
+par(mfrow=c(1,1))
+GO_enrichment <- compareCluster(list_clusters, fun="enrichGO", ont = "MF",  OrgDb=mouse,  pvalueCutoff = 0.1, universe = background_list_entrez)
+pairsim_GO_enrichment <- pairwise_termsim(GO_enrichment)
+MF_map <- emapplot(pairsim_GO_enrichment, showCategory = 25, cex_label_group=1, cex_label_category=0.9)
+MF_map + ggtitle("GO: Molecular Function") + scale_fill_manual(values=brewer.pal(n=length(list_clusters), "Set1"))
+
+## perform ORA against GO:BP
+GO_enrichment <- compareCluster(list_clusters, fun="enrichGO", ont = "BP",  OrgDb=mouse,  pvalueCutoff = 0.1, universe = background_list_entrez)
+pairsim_GO_enrichment <- pairwise_termsim(GO_enrichment)
+BP_map <- emapplot(pairsim_GO_enrichment, showCategory = 25, cex_label_group=1, cex_label_category=0.9, group_legend = TRUE)
+BP_map + ggtitle("GO: Biological Process") + scale_fill_manual(values=brewer.pal(n=length(list_clusters), "Set1"))
+
+## perform ORA against GO:BP
+GO_enrichment <- compareCluster(list_clusters, fun="enrichGO", ont = "CC",  OrgDb=mouse,  pvalueCutoff = 0.1, universe = background_list_entrez)
+pairsim_GO_enrichment <- pairwise_termsim(GO_enrichment)
+CC_map <- emapplot(pairsim_GO_enrichment, showCategory = 25, cex_label_group=1, cex_label_category=0.9)
+CC_map + ggtitle("GO: Cellular Compartment") + scale_fill_manual(values=brewer.pal(n=length(list_clusters), "Set1"))
+
+
+
+```
+
+

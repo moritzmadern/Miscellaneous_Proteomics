@@ -1,0 +1,105 @@
+{\rtf1\ansi\ansicpg1252\cocoartf1671\cocoasubrtf600
+{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww10800\viewh8400\viewkind0
+\pard\tx566\tx1133\tx1700\tx2267\tx2834\tx3401\tx3968\tx4535\tx5102\tx5669\tx6236\tx6803\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 \
+\
+### write ROC calculation function ###\
+ROC_function <- function (matrix_group1,\
+                          matrix_group2,\
+                          true_hypothesis = NULL,\
+                          ROC = TRUE, \
+                          trend_limma=TRUE)\{\
+  # note: true_hypothesis should be a logical vector; with TRUE when Nullhypothesis is true, else FALSE\
+  # note: the adjusted p-values are calculated via Benjamini Hochberg, i.e. they control the FDR (and not the FWER)\
+  # The ROC-curve uses the adjusted p-values\
+  \
+  ## read limma package\
+  library(limma)\
+  library(ROCR)\
+  \
+  ## check if dimensions are equal\
+  if( nrow(matrix_group1) != nrow(matrix_group2))\{\
+    stop("dimension of two matrixes has to be equal")\
+  \}\
+  \
+  # initiate/create output vectors\
+  fc <- apply(matrix_group2, MARGIN=1, FUN=mean, na.rm=TRUE) - apply(matrix_group1, MARGIN=1, FUN=mean, na.rm=TRUE)\
+  p_val <- numeric(nrow(matrix_group1))\
+  data_plot <- data.frame(fc=fc, true_hypothesis=true_hypothesis)\
+  \
+  # create design matrix (X-matrix, which will be applied for each protein/psm individually)\
+  design <- model.matrix(~factor(c(rep("group1", times=ncol(matrix_group1)), rep("group2", times=ncol(matrix_group2))), levels=c("group1", "group2")))\
+  colnames(design) <-  c("group1","group2")\
+  design\
+  # do limma linear model\
+  fit <- lmFit(cbind(matrix_group1, matrix_group2), design)\
+  fit_ebayes <- eBayes(fit, trend=trend_limma)  \
+  plotSA(fit_ebayes)\
+  abline(v=15, col="red")\
+  abline(v=20, col="violet")\
+  abline(h=0.2, col="green")\
+  abline(h=0.4, col="orange")\
+  LIMMAresults <- topTable(fit_ebayes, number=Inf, coef= "group2", adjust="BH", sort.by="none")\
+  # save limma results (p.val and adj.p.val)\
+  p_val <- LIMMAresults$P.Value\
+  adj_p_val <- LIMMAresults$adj.P.Val\
+  \
+  \
+  # calculate ROC curves\
+  if (ROC)\{\
+    pval_roc <- p_val\
+    pred <- prediction(pval_roc, as.numeric(true_hypothesis))  \
+    perf <- performance(pred,"tpr","fpr")\
+    par(xpd=FALSE)\
+    cutoff <- sort(unique(c(10^(-(30:3)), 1.2*10^(-(30:3)), 1.4*10^(-(30:3)), 1.6*10^(-(30:3)), 1.8*10^(-(30:3)), 2.010^(-(30:3)), seq(from=0, to=1, by=0.000001))))\
+    roc_plot_values <- sapply(cutoff, FUN=function(i)\{\
+      tpr_roc_i <- sum(pval_roc[!true_hypothesis] <= i)/(sum(!true_hypothesis))\
+      fpr_roc_i <- sum(pval_roc[true_hypothesis] <= i)/(sum(true_hypothesis))\
+      res_i <- cbind(tpr_roc_i, fpr_roc_i)\
+      return(res_i)\
+    \}) \
+    \
+    # get AUC:\
+    auc <- performance(pred, measure = "auc")\
+    auc_value <- auc@y.values[[1]]\
+    \
+    # print fp and tp numbers at p-value cutoff 0.05\
+    positives <- sum(!true_hypothesis)\
+    tp_pval <- sum(p_val[!true_hypothesis] <= 0.05)\
+    fn_pval <- sum(p_val[!true_hypothesis] > 0.05)\
+    fp_pval <- sum(p_val[true_hypothesis] <= 0.05)\
+    tn_pval <- sum(p_val[true_hypothesis] > 0.05)\
+    conf_matrix_pval_0.05 <- matrix(c(tp_pval, fn_pval, fp_pval, tn_pval), byrow = FALSE, ncol=2)\
+    rownames(conf_matrix_pval_0.05) <- c("predicted positive", "predicted negative")\
+    colnames(conf_matrix_pval_0.05) <- c("positive", "negative")\
+    # print(conf_matrix_pval_0.05)\
+    \
+    # print fp and tp numbers at adj. p-value cutoff 0.05\
+    tp_adj_pval <- sum(adj_p_val[!true_hypothesis] <= 0.05)\
+    fn_adj_pval <- sum(adj_p_val[!true_hypothesis] > 0.05)\
+    fp_adj_pval <- sum(adj_p_val[true_hypothesis] <= 0.05)\
+    tn_adj_pval <- sum(adj_p_val[true_hypothesis] > 0.05)\
+    conf_matrix_adj_pval_0.05 <- matrix(c(tp_adj_pval, fn_adj_pval, fp_adj_pval, tn_adj_pval), byrow = FALSE, ncol=2)\
+    rownames(conf_matrix_adj_pval_0.05) <- c("predicted positive", "predicted negative")\
+    colnames(conf_matrix_adj_pval_0.05) <- c("positive", "negative")\
+    # print(conf_matrix_adj_pval_0.05)\
+  \}\
+  \
+  return(list(FC=fc,\
+              true_hypothesis=true_hypothesis,\
+              p_val=p_val,\
+              adj_p_val=adj_p_val, \
+              ROC_object=perf, \
+              auc_value=auc_value,\
+              conf_matrix_pval=conf_matrix_pval_0.05,\
+              conf_matrix_adj_pval=conf_matrix_adj_pval_0.05,\
+              ROC_coordinates = t(roc_plot_values),\
+              ROC_coordinates_pval_0.05= c(fp_pval/(fp_pval+tn_pval),tp_pval/(tp_pval + fn_pval))))\
+\}\
+\
+\
+}

@@ -1,0 +1,623 @@
+---
+title: "Labeling Efficiency Calculation from MIX"
+author: "Moritz"
+date: "5/21/2021"
+output: html_document
+---
+
+
+
+
+
+
+
+
+```{r    A) REQUIREMENTS}
+
+
+# This script requires "BiocManager" and "Msnbase" to be installed, as well as "ez" and "RColorBrewer".
+# If these packages are not installed, run the following lines of code in your console (note: remove the "#")
+# install.packages("BiocManager")
+# BiocManager::install("MSnbase")
+# install.packages("RColorBrewer")
+# install.packages("ez")
+
+
+
+# Load required packages and create needed objects:
+rm(list=ls())
+library("RColorBrewer")
+library("MSnbase")
+library("ez")
+setMSnbaseVerbose(FALSE)
+
+TMT16 <- new("ReporterIons", name="TMT16plex",
+             reporterNames=c("126C", "127N","127C", "128N", "128C", "129N", "129C", "130N", "130C", "131N", "131C", "132N", "132C", "133N", "133C", "134N"),
+             mz=c(126.127726, 127.124761, 127.131081, 128.128116, 128.134436, 129.131471, 129.13779, 130.134825, 130.141145, 131.13818, 131.14450, 132.141535, 132.147855, 133.14489, 133.15121, 134.148245),
+             width=0.002,
+             col=rainbow(16))
+
+
+
+```
+
+
+
+
+```{r     B) PARAMETERS}
+
+# PLEASE READ THE USERGUIDE CAREFULLY. SPECIFYING PARAMETERS INCORRECTLY WILL RESULT IN ERRORS.
+
+# specify working directory
+wd <- "X:\\Wolfgang\\Terka 1\\labeling eff_cv45"
+setwd(wd)
+writeLines("files in working directory:")
+list.files()
+
+
+# specify file names
+mzml_file <- "X:\\Wolfgang\\Terka 1\\labeling eff_cv45\\20210621_E2_RSLC2_Reiter_Hartl_UW_MPL_label_eff_black.mzML"
+msms.txt_file <-"X:\\Wolfgang\\Terka 1\\labeling eff_cv45\\msms.txt"
+
+
+# specify which reporter ions you have in your experiment
+tmt_reporter <- TMT10
+
+# specify name of TMT-modifications (both n-term as well as K), as they are abbreviated in the column "Modified Sequence" in msms.txt (any matching pattern is fine)
+TMT_mod_abbreviation <- "mo"
+
+
+# specify name of N-terminal acetylation as it is abbreviated in the column "Modified Sequence" in msms.txt (any matching pattern is fine)
+N_term_acetyl_abbreviation <- "ac"
+
+
+# specify groups of channels
+groups <- c(1,2,1,2,1,2,3,4,3,4,3,4,5,6,5,6)
+writeLines("How many samples:")
+length(groups)
+
+# set ANOVA p-value cutoff. Spectra with p-value smaller than cutoff will be discarded. This value is only relevant when groups != NULL
+ANOVA_pval_cutoff <- 0.05
+
+
+# set your PPF-cutoff. PSMs with lower PPF will be discarded (PPF = Precursor Purity Fraction, similar to Maxquants PPF)
+PPF_cutoff <- 0.7
+
+
+# set your precursorIntensity-quantile cutoff for partially labeled precursor peptides. Rest will not be included in calculations.
+precursor_intensity_quantile_cutoff_partiallyTMT <- 0.2
+
+
+# set your MQ score quantile cutoff. Lower scoring spectra (PSMs) will be discarded
+score_cutoff <- 0.1
+
+
+```
+
+
+
+
+```{r    C) READ IN ID DATA (MSMS.TXT) }
+# Read in ID (msms.txt) file. This file should be the result of a MQ search
+df_id <- read.delim(file=msms.txt_file, sep="\t", stringsAsFactors = FALSE)
+dim(df_id)
+writeLines("Name of raw file in msms.txt:")
+table(df_id$Raw.file)
+writeLines("First 20 Modified Sequences")
+df_id$Modified.sequence[1:20]
+
+
+# Remove reverse
+writeLines("Dimensions before and after Filtering:")
+df_id <- df_id[!df_id$Reverse == "+",]
+dim(df_id)
+
+
+# Remove contaminants
+bool_con <- grepl(df_id$Proteins,pattern="CON_")
+sum(bool_con)
+df_id <- df_id[!bool_con,]
+dim(df_id)
+
+
+# Remove second peptides
+df_id <- df_id[df_id$Type != "MULTI-SECPEP",]
+
+
+# Remove lowest scoring spectra based on score cutoff
+cutoff <- quantile(df_id$Score, probs= score_cutoff)
+bool_keep <- df_id$Score > cutoff
+df_id <- df_id[bool_keep,]
+dim(df_id)
+
+
+# Check if mass error is tolerable. median should be around 1*10^(-4). 
+mass_error_estimate <- abs(as.numeric(df_id$Mass.error..Da.))
+writeLines("Mass Error Summary:")
+summary(mass_error_estimate)
+
+
+# Get overall view on modifications, and extract modified sequence
+writeLines("Which modifications were found how often:")
+table(df_id$Modifications)[1:50]
+mod_sequence <- df_id$Modified.sequence
+writeLines("First 50 etries of modified sequence:")
+mod_sequence[1:20]
+
+
+
+```
+
+
+
+
+
+```{r     D) FIND FULLY LABELED/UNLABELED/PARTIALLY LABELED PSMS}
+
+# 1) Non-TMT PSMs
+bool_nonTMT <- !grepl(mod_sequence, pattern=TMT_mod_abbreviation)
+ind_nonTMT <- which(bool_nonTMT)
+writeLines("Sequences of first 20 unlabeled peptides:")
+mod_sequence[ind_nonTMT][1:20]
+writeLines(paste0("number of non-labeled peptide PSMs: ",length(ind_nonTMT)))
+
+
+# 2) Fully TMT labeled
+number_K <- gregexpr(text= mod_sequence, pattern="K[^)]")
+number_K <- sapply(number_K, FUN= ">", 0)
+number_K <- sapply(number_K, FUN=sum)
+number_TMT <- gregexpr(text= mod_sequence, pattern=TMT_mod_abbreviation)
+number_TMT <- sapply(number_TMT, FUN=">", 0)
+number_TMT <- sapply(number_TMT, FUN=sum)
+number_Nterm_ac <- gregexpr(text=mod_sequence, pattern=N_term_acetyl_abbreviation)
+number_Nterm_ac <- sapply(number_Nterm_ac, FUN= ">", 0)
+number_Nterm_ac <- sapply(number_Nterm_ac , FUN=sum)
+max_number_labels <- number_K + 1 - number_Nterm_ac
+ind_fullTMT <- which(max_number_labels ==  number_TMT & !bool_nonTMT)
+writeLines(paste0("number of fully labeled peptide PSMs: ",length(ind_fullTMT)))
+
+
+# 3) Partially TMT labeled
+ind_partiallyTMT <- which(number_TMT < max_number_labels & !bool_nonTMT)
+writeLines(paste0("number of partially labeled peptide PSMs: ",length(ind_partiallyTMT)))
+
+
+
+# Check if all adds up. If the two numbers differ, something is incorrect
+stopifnot(length(mod_sequence) == length(ind_partiallyTMT) + length(ind_fullTMT) + length(ind_nonTMT) )
+
+
+# Extract scan numbers of 1), 2), 3)
+scan_num_nonTMT <- df_id$Scan.number[ind_nonTMT]
+scan_num_fullTMT <- df_id$Scan.number[ind_fullTMT]
+scan_num_partiallyTMT <- df_id$Scan.number[ind_partiallyTMT]
+
+
+# calculate global labeling efficiency (as the fraction of labeled amino groups vs total amino groups that are not acetylated)
+label_eff_global <- sum(number_TMT)/sum(max_number_labels)*100
+writeLines(paste0("Global Labeling Efficiency:   ", label_eff_global))
+
+writeLines(paste0("Calculated global labeling efficiency: ",round(label_eff_global,digits=2)))
+
+
+
+# note: if label_eff_global is very high (>99%), you can ignore the following code-blocks that are described as "OPTIONAL".
+# (those code blocks are more relevant if labeling did not go too well)
+
+
+# attempt to automatize script: only when global labeling efficiency is smaller than 98%, execute OPTIONAL code blocks
+if(label_eff_global<98){
+  OPTIONAL <- TRUE
+} else {
+  OPTIONAL <- FALSE
+}
+writeLines(paste0("Will OPTINAL code Blocks in section E) be executed? ", OPTIONAL ))
+
+
+
+```
+
+
+
+```{r     E) READ IN MZML-FILE; FILTER MORE STRINGENTLY (OPTIONAL) AND EXTRACT REPORTER INTENSITIES}
+
+# 1) Read in mzml file
+df_spec <- readMSData(mzml_file, mode= "onDisk")
+dim(fData(df_spec))
+
+
+# 2) Check if all spectra are centroided, they should be!
+writeLines("This should be TRUE:")
+all(centroided(df_spec))
+
+
+if (OPTIONAL){
+
+# 3) OPTIONAL: Calculate PPF, add PPF to feature data, and then filter partially labeled PSMs with specified PPF-cutoff
+calculate_PPF <- function(msms, MSnExp, key="Scan.number", rawfile="Raw.file", charge="Charge", mass_error_tolerance = 0.005){
+  # This function requires: 
+  # 1) an object of class "MsnExp", as generated by readMSData() of package "MSnbase". This "MsnExp" object should only contain MS1 and MS2 spectra, with peak-picking performed.
+  # 2) an PSM-table (for example  MQ search result "msms.txt").
+  # 3) a unique identity column for each spectrum in both objects 1) and 2), i.e. a column with matching unique entries should therefore exist in the PSM-table as well as in fData(MSnExp). The column name of these columns are specified by the parameter "key".
+  # 4) a column for raw file identity in both objects 1) and 2). A column with matching entries should therefore exist in the PSM-table, as well as in fData(MSnExp). The column names are specified by the parameter "rawfile"
+  # note: this function is takes a long time (~30 min per raw file)
+  # note: choose mass error tolerance according to distribution of mass error. Per default, use 0.005
+  # note: this function assumes that the PSM-table has a column called "Charge" which denotes charge of the Precursor
+  # note: this script only looks for +1 and -1 dalton isotopes (because isolation window span < 1 usually)
+  # note: errors that don't stop the function can be ignored (hence the use of try() to prevent stop). They can happen because precursor ion is not found in the isolation window
+  
+  # save fData of MSnExp in memory
+  fData_MSnExp <- fData(MSnExp)
+  fData_MSnExp[,key] <- fData_MSnExp$spIdx
+  fData_MSnExp[,rawfile] <- sub(sampleNames(df_spec), pattern="[.]mzML", replacement = "")[fData(df_spec)$fileIdx]
+  
+  # convert Scan.number of msms into character vector
+  msms[,key] <- as.character(msms[,key])
+  
+  # extract key columns of both PSM-table and fData(MSnExp)
+  key_msms <- as.character(msms[,key])
+  key_MSnexp<- as.character(fData_MSnExp[,key])
+  
+  # initiate PPF-vector as an empty vector
+  PPF <- numeric(length(key_msms))
+  names(PPF) <- key_msms
+  
+  ## initiate min intensity MS1 as empty vector
+  min_intensity_MS1 <- numeric(length(key_msms))
+  names(min_intensity_MS1) <-key_msms
+  
+  
+  
+  # create raw file-specific spectrum index list and create raw file-specific fData list of MSnExp, then fill it for each unique raw file; 
+  print("create sample index list and fData list")
+  rawfileindex_list <- vector(mode="list", length = length(unique(msms[,rawfile])))
+  rawfilefData_list <- vector(mode="list", length = length(unique(msms[,rawfile])))
+  names(rawfileindex_list) <- unique(msms[,rawfile])
+  names(rawfilefData_list) <- unique(msms[,rawfile])
+  for (l in unique(msms[, rawfile])){
+    print(l)
+    rawfileindex_list[[l]] <- which(fData_MSnExp[,rawfile] == l)
+    rawfilefData_list[[l]] <- fData_MSnExp[rawfileindex_list[[l]],]
+  }
+  
+  
+  # extract MS1 features for every PSM in the PSM-table msms
+  for (i in key_msms){
+    print(i)
+    
+    # find index of corresponding spectrum in MSnExp object
+    ind_i <- which(key_MSnexp == i)
+    
+    # find spectrum index of corresponding spectrum within raw file
+    ind_ms2_i <- fData_MSnExp[ind_i,]$spIdx
+    
+    # Extract msms data on PSM i
+    msms_i <- msms[key_msms == i,, drop=FALSE]
+    msms_i
+    
+    # extract charge of precursor from msms
+    charge_i <- msms_i[,charge]
+    charge_i
+    
+    # find corresponding samplename (in column rawfile) for PSM i 
+    rawfile_i <- msms_i[,rawfile]
+    rawfile_i
+    
+    # extract fData of ms2 spectrum
+    fData_ms2_i <- fData_MSnExp[ind_i,,drop=FALSE]
+    
+    # Find index of previous and following MS1 spectras within raw file:
+    ind_ms1_i <- setNames(numeric(2), c("MS1_previous","MS1_following"))
+    ind_ms1_i["MS1_previous"]  <- max(rawfilefData_list[[rawfile_i]] [rawfilefData_list[[rawfile_i]][, "msLevel"] == 1  &  rawfilefData_list[[rawfile_i]][, "spIdx"] < ind_ms2_i , "spIdx"])
+    ind_ms1_i["MS1_following"] <- min(rawfilefData_list[[rawfile_i]] [rawfilefData_list[[rawfile_i]][, "msLevel"] == 1  &  rawfilefData_list[[rawfile_i]][, "spIdx"] > ind_ms2_i , "spIdx"])
+    ind_ms1_i <- ind_ms1_i[!is.infinite(ind_ms1_i)]
+    
+    
+    
+    
+    # calculate distances in retention time between ms2 and adjacent ms1 spectra. From these distances, calculate relative weights (smaller distance -> higher weight). These weights are used when calculating PPF; the idea behind this is that using both adjacent MS1-spectra for any given PSM results in better PPF estimates.
+    rt_ms1_i <- setNames(numeric(2), c("MS1_previous","MS1_following"))
+    rt_ms1_i["MS1_previous"] <- fData(MSnExp[rawfileindex_list[[rawfile_i]]][ind_ms1_i["MS1_previous"]])$retentionTime
+    rt_ms1_i["MS1_previous"] <- rawfilefData_list[[rawfile_i]] [rawfilefData_list[[rawfile_i]][,"spIdx"] == ind_ms1_i["MS1_previous"] ,"retentionTime"]
+    rt_ms1_i["MS1_following"] <- rawfilefData_list[[rawfile_i]] [rawfilefData_list[[rawfile_i]][,"spIdx"] == ind_ms1_i["MS1_following"] ,"retentionTime"]
+    rt_ms2_i <- fData_ms2_i$retentionTime
+    dist_ms1_ms2_i <- abs(rt_ms1_i - rt_ms2_i)
+    dist_ms1_ms2_i
+    relative_weights_i <- (1/dist_ms1_ms2_i)/sum((1/dist_ms1_ms2_i))
+    relative_weights_i
+    
+    # Extract index closer MS1 spectrum
+    ind_closer_ms1 <- ind_ms1_i[names(which.min(dist_ms1_ms2_i))]
+    ind_closer_ms1
+    
+    # calculate isolationwindow that was used for the MS2 Spectrum
+    isolationwindow <- c(fData_ms2_i$isolationWindowTargetMZ - fData_ms2_i$isolationWindowLowerOffset, fData_ms2_i$isolationWindowTargetMZ + fData_ms2_i$isolationWindowUpperOffset)
+    
+    
+    # go over all adjacent ms1 spectra in order to extract isolation window 
+    for (p in 1:length(ind_ms1_i)){
+      # get all of the peaks that fall into this isolation window for ms1 spectrum p. Weight intensity by distance
+      df_ms1_p <- as.data.frame(MSnExp[rawfileindex_list[[rawfile_i]]][ind_ms1_i[p]])
+      df_ms1_isolationwindow_p <- df_ms1_p[df_ms1_p$mz > isolationwindow[1] & df_ms1_p$mz < isolationwindow[2],]
+      df_ms1_isolationwindow_p$i <- df_ms1_isolationwindow_p$i * relative_weights_i[p]
+      df_ms1_isolationwindow_p
+      
+      # if this is the closer MS1-spectrum, get minimum preak intensity of whole spectrum
+      if (ind_ms1_i[p] == ind_closer_ms1){
+        min_intensity_MS1[i] <- min(df_ms1_p[df_ms1_p$mz > (fData_ms2_i$isolationWindowTargetMZ -100)  & df_ms1_p$mz < (fData_ms2_i$isolationWindowTargetMZ + 100), ]$i)
+      }
+      
+      
+      # if p=2 (i.e. the folliwing MS1-spectrum), adjust mz so that precursor peak locations coincide
+      if (p==2){
+        
+        # if isolation window is empty, impute precursor intensity at noise level
+        if (dim(df_ms1_isolationwindow_p)[1] == 0){
+          df_ms1_imputed_precursor <- data.frame(file = NA, rt= NA, mz = fData_ms2_i$isolationWindowTargetMZ, i= min_intensity_MS1[i]*relative_weights_i[p] )
+          df_ms1_isolationwindow_p <- rbind(df_ms1_isolationwindow_p, df_ms1_imputed_precursor)
+        } else {
+          # check if precursor can be found within a mass tolerance
+          proposed_precursor_mz_in_following_MS2 <- df_ms1_isolationwindow_p$mz[which.min(abs(df_ms1_isolationwindow_p$mz - fData_ms2_i$isolationWindowTargetMZ))]
+          proposed_precursor_mz_in_following_MS2
+          proposed_correction_scalar <- proposed_precursor_mz_in_following_MS2 - fData_ms2_i$isolationWindowTargetMZ
+          proposed_correction_scalar
+          # if yes, adjust mz slightly 
+          if(abs(proposed_correction_scalar) <= mass_error_tolerance){
+            df_ms1_isolationwindow_p$mz <- df_ms1_isolationwindow_p$mz - proposed_correction_scalar
+          }
+          # if not, impute precursor intensity at noise level
+          if (abs(proposed_correction_scalar) > mass_error_tolerance){
+            df_ms1_imputed_precursor <- data.frame(file = NA, rt= NA, mz = fData_ms2_i$isolationWindowTargetMZ, i= min_intensity_MS1[i]*relative_weights_i[p] )
+            df_ms1_isolationwindow_p <- rbind(df_ms1_isolationwindow_p, df_ms1_imputed_precursor)
+          }  
+        }
+      }
+      
+      
+      # create dataframe that stores information on both adjacent MS1 spectras
+      if (p==1){
+        df_ms1_isolationwindow <- df_ms1_isolationwindow_p
+      } else {
+        df_ms1_isolationwindow <- rbind(df_ms1_isolationwindow, df_ms1_isolationwindow_p)
+      }
+    }
+    
+    
+    # skip this PSM when no peaks are found in the isolation windows of the adjacent MS1 spectras
+    if (nrow(df_ms1_isolationwindow) == 0 ){
+      print("skipped, because for this precursor, no peak was found in the adjacent MS1 spectra isolation window ranges")
+      next
+    }
+    
+
+    # we assume that the true precursor (which might be an isotope) is located at the isolationWindowTargetMZ
+    precursor_mz <- fData_ms2_i$isolationWindowTargetMZ
+    
+    # get index, which of those peaks is the precursor for the MS2 spectrum
+    precursor_index <- which(abs(df_ms1_isolationwindow$mz - precursor_mz) < mass_error_tolerance)
+    precursor_index
+    
+    # check if there are also any isotopes in this isolationwindow
+    if(length(precursor_index)==0){
+      precursor_mz <- precursor_mz
+    } else{
+      precursor_mz <- df_ms1_isolationwindow$mz[precursor_index][1]
+    }
+    heavy_isotope_mz <- precursor_mz + 1/charge_i
+    light_isotope_mz <- precursor_mz - 1/charge_i
+    
+    # get indexes for isotopes (since they are already within the same spectrum, the mass error should be the same and cancels out during substraction -> therefore use smaller mass tolerance )
+    isotope_index <- which( (abs(df_ms1_isolationwindow$mz - heavy_isotope_mz ) <  mass_error_tolerance/2) | (abs(df_ms1_isolationwindow$mz - light_isotope_mz) <  mass_error_tolerance/2)  )
+    isotope_index
+    if(length(isotope_index) > 0){
+      precursor_index <- c(precursor_index, isotope_index)
+    }
+    
+    # calculate PPF and store it in the vector initialized above
+    PPF_i <- sum(df_ms1_isolationwindow$i[precursor_index]) / sum(df_ms1_isolationwindow$i, na.rm=TRUE)
+    PPF[i] <- PPF_i
+  }
+  
+  return(PPF = PPF)
+}  
+PPF <- calculate_PPF(msms=df_id, MSnExp = df_spec)
+# add PPF to fData
+PPF_fData <- setNames(numeric(nrow(fData(df_spec))), nm = as.character(fData(df_spec)$spIdx))
+PPF_fData[names(PPF)] <- PPF
+fData(df_spec)$PPF <- PPF_fData 
+fData_pool1 <- fData(df_spec)
+save(fData_pool1, file="df_complexitypool1_PPF_old_way.R")
+hist(PPF, main="Histogramm of Precursor Purity Fraction for PSMs")
+}
+
+
+
+# 4) Extract MS2 scans for different types of labeled precursors as found by MQ, and check if its only MS2
+df_spec_nonTMT <- df_spec[scan_num_nonTMT]
+df_spec_partiallyTMT <- df_spec[scan_num_partiallyTMT]
+df_spec_fullTMT <- df_spec[scan_num_fullTMT]
+table(msLevel(df_spec_nonTMT))
+table(msLevel(df_spec_fullTMT))
+table(msLevel(df_spec_partiallyTMT))             # if this is <10, skip the OPTIONAL following blocks!
+
+
+
+if (OPTIONAL){
+# 5) OPTIONAL: filter for PPF > PPF_cutoff 
+ind_PPF_cutoff_nonTMT <- which(fData(df_spec_nonTMT)$PPF > PPF_cutoff)
+ind_PPF_cutoff_partiallyTMT <- which(fData(df_spec_partiallyTMT)$PPF > PPF_cutoff)
+ind_PPF_cutoff_fullTMT <- which(fData(df_spec_fullTMT)$PPF > PPF_cutoff)
+df_spec_nonTMT <- df_spec_nonTMT[ind_PPF_cutoff_nonTMT]
+df_spec_partiallyTMT <- df_spec_partiallyTMT[ind_PPF_cutoff_partiallyTMT]
+df_spec_fullTMT <- df_spec_fullTMT[ind_PPF_cutoff_fullTMT]
+table(msLevel(df_spec_nonTMT))
+table(msLevel(df_spec_fullTMT))
+table(msLevel(df_spec_partiallyTMT))             # if this is <10, skip the OPTIONAL following blocks!
+}
+
+if (OPTIONAL){
+# 6) OPTIONAL: Filter: precursor intensity quantile cutoff for partially labeled precursor peptides
+median(fData(df_spec_partiallyTMT)$precursorIntensity)
+ind_precursor_intensity_cutoff_partiallyTMT<- which(fData(df_spec_partiallyTMT)$precursorIntensity >  quantile(fData(df_spec_partiallyTMT)$precursorIntensity, probs = precursor_intensity_quantile_cutoff_partiallyTMT) )
+df_spec_partiallyTMT <- df_spec_partiallyTMT[ind_precursor_intensity_cutoff_partiallyTMT]
+median(fData(df_spec_partiallyTMT)$precursorIntensity)
+table(msLevel(df_spec_partiallyTMT))             # if this is <10, skip the OPTIONAL following blocks!
+}
+
+
+# 7) Extract quantitative reporter ion intensity data
+df_qnt_nonTMT <- quantify(df_spec_nonTMT, method="max", reporters = tmt_reporter)
+m_qnt_nonTMT <- exprs(df_qnt_nonTMT)
+df_qnt_fullTMT <- quantify(df_spec_fullTMT, method="max", reporters = tmt_reporter)
+m_qnt_fullTMT <- exprs(df_qnt_fullTMT)
+df_qnt_partiallyTMT_before_ANOVA_filter <- quantify(df_spec_partiallyTMT, method="max", reporters = tmt_reporter)
+m_qnt_partiallyTMT_before_ANOVA_filter <- exprs(df_qnt_partiallyTMT_before_ANOVA_filter )
+dim(m_qnt_partiallyTMT_before_ANOVA_filter)[1]
+df_qnt_partiallyTMT <- df_qnt_partiallyTMT_before_ANOVA_filter   # will be overwritten if anova-filter is applied
+m_qnt_partiallyTMT <- m_qnt_partiallyTMT_before_ANOVA_filter     # will be overwritten if anova-filter is applied
+
+
+# 8) calculate colsums 
+colsums_nonTMT <- apply(m_qnt_nonTMT, FUN=sum, MARGIN=2, na.rm=TRUE)
+colsums_partiallyTMT <- apply(m_qnt_partiallyTMT_before_ANOVA_filter, FUN=sum, MARGIN=2, na.rm=TRUE)
+colsums_fullTMT <- apply(m_qnt_fullTMT, FUN=sum, MARGIN=2, na.rm=TRUE)
+
+
+# 9) calculate normalization factor to correct for unequal mixing (only relevant for ANOVA filter!)
+relative_channel_intensity <- (colsums_fullTMT + colsums_partiallyTMT)/sum(colsums_fullTMT + colsums_partiallyTMT)
+relative_channel_intensity
+norm_factor <- mean(relative_channel_intensity)/relative_channel_intensity
+norm_factor
+
+if (OPTIONAL){
+# 10) OPTIONAL: filter out differentialy expressed partially labeled peptidesvia ANOVA, only if groups != NULL 
+p_val_vector <- numeric(nrow(m_qnt_partiallyTMT_before_ANOVA_filter))
+p_val_vector
+if (!is.null(groups)){
+  groups <- factor(groups)
+  
+  for (i in 1:nrow(m_qnt_partiallyTMT_before_ANOVA_filter)){
+    
+    reporter_intensities_i <- m_qnt_partiallyTMT_before_ANOVA_filter[i,, drop=TRUE]*norm_factor
+    subjects <- 1:length(reporter_intensities_i)
+    data_i <- data.frame(reporter_intensities_i = reporter_intensities_i, groups= groups, subjects= factor(subjects))
+    anova_i <- ezANOVA(data=data_i, wid=subjects, dv=reporter_intensities_i, between= groups)
+    p_val_vector[i]<- anova_i$ANOVA$p
+  }
+  ind_keep_after_ANOVA <- which(p_val_vector > ANOVA_pval_cutoff)
+  ind_keep_after_ANOVA
+  df_qnt_partiallyTMT <- df_qnt_partiallyTMT_before_ANOVA_filter[ind_keep_after_ANOVA]
+  m_qnt_partiallyTMT <- exprs(df_qnt_partiallyTMT)
+  
+} else{
+  
+  df_qnt_partiallyTMT <- df_qnt_partiallyTMT_before_ANOVA_filter
+  m_qnt_partiallyTMT <- exprs(df_qnt_partiallyTMT)
+  
+}
+dim(m_qnt_partiallyTMT)[1]  # how many partially labeled PSMs are left after this final filter?
+}
+
+```
+
+
+
+
+
+
+```{r     F) CALCULATE INDIVIDUAL LABELING EFFICIENCIES}
+
+
+# calculate proxy efficiency as ratio 
+proxy_labeling_efficiency <- round((1 - colsums_partiallyTMT/(colsums_fullTMT + colsums_partiallyTMT))*100, digits=4)
+proxy_labeling_deficiency <- 100 - proxy_labeling_efficiency
+
+
+
+# reference to first channel to solve linear equation
+proxy_deficiency_reference_to_first_channel <- proxy_labeling_deficiency/proxy_labeling_deficiency[1]
+
+
+# solve linear equation, using global efficiency as calculated via number of PSMs
+labeling_deficiency_first_channel <- (100-label_eff_global)/sum(relative_channel_intensity*proxy_deficiency_reference_to_first_channel)
+
+
+# solve for all other channels
+labeling_deficiency_all_channels <- labeling_deficiency_first_channel*proxy_deficiency_reference_to_first_channel
+labeling_efficiency_all_channels <- 100 - labeling_deficiency_all_channels  
+
+
+# summarize relevant information  
+labeling_efficiency_all_channels <- round(labeling_efficiency_all_channels, digits=2)
+label_eff_global <- round(label_eff_global, digits=2)
+relative_channel_intensity <- round(relative_channel_intensity, digits=3)
+number_partially_labeled_for_calculation <- nrow(m_qnt_partiallyTMT)
+number_full_labeled_for_calculation <- nrow(m_qnt_fullTMT)
+median_mass_error <- round(median(mass_error_estimate, na.rm=TRUE),digits=5)
+channel_names <- names(labeling_efficiency_all_channels)
+number_spectra_removed_by_ANOVA_filter <- dim(m_qnt_partiallyTMT_before_ANOVA_filter)[1] - dim(m_qnt_partiallyTMT)[1]
+set.seed(12345)
+colorpal_plot <- colorRampPalette(brewer.pal(9, "Set1"))
+colors_plot <- colorpal_plot(length(tmt_reporter))
+par(mar=c(10,10,10,10))
+
+
+```
+
+
+
+
+```{r     G) RESULT }
+  
+
+# estimated label efficiency of individual channels (in percent):
+writeLines("Estimated Labeling Efficiency of all Channels:")
+labeling_efficiency_all_channels
+barplot(labeling_efficiency_all_channels, ylim=c(0,100), col=colors_plot, main="Estimated Labeling Efficiency of all Channels")
+
+# global label efficiency of the mix (in percent)
+writeLines("Calculated Global Labeling Efficiency:")
+label_eff_global
+
+# relative channel intensities, did equal mixing work well?
+relative_channel_intensity*100
+barplot(relative_channel_intensity, col=colors_plot, main="Relative Channel Intensity of all Channels")
+
+# calculate factors for equal mixing:
+writeLines("Factors required for equal mixing:")
+max_channel <- names(which.max(relative_channel_intensity))
+round(relative_channel_intensity[max_channel]/relative_channel_intensity,digits=2)   #### HIER ####  multiply this with a volume, say 40, to get volumes needed for equal mixing!
+
+# number of partially labeled precursor spectra used for label efficiency calculation:
+writeLines("Number of partially labeled PSMs for final calculation:")
+number_partially_labeled_for_calculation
+
+# number of fully labeled precursors used for label efficiency calculation:
+writeLines("Number of fully labeled PSMs for final calculation: ")
+number_full_labeled_for_calculation
+
+# number of spectra removed by ANOVA:
+writeLines("Number of PSMs removed by ANOVA filter:")
+number_spectra_removed_by_ANOVA_filter
+
+# median mass error of spectra (calculated by MaxQuant - should be smaller than ~ 0.0005 !) :
+writeLines("Median Mass error:")
+median_mass_error
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+

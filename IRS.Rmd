@@ -1,0 +1,453 @@
+## IRS: Normalization between plexes via a common reference channel
+## Moritz Madern
+## 26.08.2021
+
+
+Note: This script assumes that reporter ion columns have already been impurity corrected and normalized within plexes.
+
+
+```{r Packages}
+
+## read required in packages
+library(ggVennDiagram)
+library(tidyverse)
+library(pals)
+
+```
+
+
+```{r Parameters}
+
+## specify filepaths: A character vector pointing to the files to be read into R. Each file corresponds to a single plex and should contain (within-plex) normalized untransformed reporter ion intensity columns
+filepaths <- c("./normalized_Acetyl (K)Sites_Set1.txt",
+               "./normalized_Acetyl (K)Sites_Set2.txt")
+
+## specify plex_names: A character vector attributing a unique name to each plex
+plex_names <- c("WT", "KO")
+
+## specify key_column: A single character entry denoting the column that exists in all files and should be used for IRS normalization. E.g., "Majority.protein.IDs" 
+key_column <- "unique_ID" 
+
+## specify rep_intensity_pattern: a character entry denoting the pattern that retrieves the reporter ion intensity column names when pattern searching
+rep_intensity_pattern <- "intensity_[0-9]*$"
+
+## specify reference_channels: a list with character vectors as entries. Each list entry (i.e. character vector) contains the column names of reference channel(s) in the respective plex
+list_reference_channels <- list(c("Reporter.intensity_16"), c("Reporter.intensity_16"))
+
+## specify list_groups: a list with character vector entries. Each list entry (i.e. character vector) contains group specifications of samples in the respective plex
+list_groups <- list(c("WT_naive", "WT_naive", "WT_naive", "WT_Th17", "WT_Th1", "WT_Th17", "WT_Th1", "WT_Th17", "WT_Th1", "WT_Treg", "WT_Th2", "WT_Treg", "WT_Th2", "WT_Treg", "WT_Th2", "REF"), c("KO_naive", "KO_naive", "KO_naive", "KO_Th17", "KO_Th1", "KO_Th17", "KO_Th1", "KO_Th17", "KO_Th1", "KO_Treg", "KO_Th2", "KO_Treg", "KO_Th2", "KO_Treg", "KO_Th2", "REF"))
+
+## specify list_samplenames: a list with character vector entries. Each list entry (i.e. character vector) contains samplename specifications of samples in the respective plex
+list_samplenames <- list(c("WT_naive_b", "WT_naive_a", "WT_naive_c", "WT_Th17_c", "WT_Th1_a", "WT_Th17_d", "WT_Th1_b", "WT_Th17_e", "WT_Th1_c", "WT_Treg_b", "WT_Th2_a", "WT_Treg_c", "WT_Th2_b", "WT_Treg_d", "WT_Th2_c", "REF"),c("KO_naive_b", "KO_naive_a", "KO_naive_c", "KO_Th17_c", "KO_Th1_a", "KO_Th17_d", "KO_Th1_b", "KO_Th17_e", "KO_Th1_c", "KO_Treg_b", "KO_Th2_a", "KO_Treg_c", "KO_Th2_b", "KO_Treg_d", "KO_Th2_c", "REF"))
+
+
+```
+
+
+```{r write required functions}
+
+
+
+### write DE testing function ###
+DE_test <- function (matrix_group1,
+                     matrix_group2, 
+                     method="limma", 
+                     trend_limma=TRUE, 
+                     name_group1="group1",
+                     name_group2="group2"){
+  
+  
+  if( nrow(matrix_group1) != nrow(matrix_group2)){
+    stop("dimension of two matrixes has to be equal")
+  }
+  
+  # initiate/create output vectors
+  fc <- apply(matrix_group2, MARGIN=1, FUN=mean, na.rm=TRUE) - apply(matrix_group1, MARGIN=1, FUN=mean, na.rm=TRUE)
+  mean_intensity <- rowMeans(cbind(matrix_group1,matrix_group2))
+  p_val <- numeric(nrow(matrix_group1))
+  print(hist(fc,breaks=50))
+  
+  if (method == "t.test"){
+    # t-test and get p-values
+    for (i in 1:nrow(matrix_group1)){
+      group1_i <- matrix_group1[i,]
+      group2_i <- matrix_group2[i,]
+      t.test_i <- t.test(x=group1_i, y=group2_i, alternative = "two.sided", var.equal = FALSE)
+      p_val[i] <- t.test_i$p.value
+      adj_p_val <- p.adjust(p_val, method = "BH")
+    }
+  }  
+  
+  if (method == "limma"){
+    # create design matrix (X-matrix, which will be applied for each protein/psm individually)
+    design <- model.matrix(~factor(c(rep("group1", times=ncol(matrix_group1)), rep("group2", times=ncol(matrix_group2))), levels=c("group1", "group2")))
+    colnames(design) <-  c("group1","group2")
+    # do limma linear model
+    fit <- lmFit(cbind(matrix_group1, matrix_group2), design)
+    fit_ebayes <- eBayes(fit, trend=trend_limma)  
+    LIMMAresults <- topTable(fit_ebayes, number=Inf, coef= "group2", adjust="BH", sort.by="none")
+    # save limma results (p.val and adj.p.val)
+    p_val <- LIMMAresults$P.Value
+    adj_p_val <- LIMMAresults$adj.P.Val
+  }
+  
+  # plot volcano plot using p-value
+  par(mfrow=c(1,1))
+  par(mar=c(4,4,4,5))
+  par(mgp=c(2.5,0.8,0))
+  par(xpd=TRUE)
+  plot(x= fc, y= -log(p_val,base=10), pch=19, cex=1, xaxt="n", yaxt="n", xlab= paste0(name_group2, " / ", name_group1, " \nfold change [log2]" ), ylab = "- log10 (p-value)",main= "Volcano Plot \n p-val", cex.lab=0.7, cex.main= 0.8, font.lab=2, xlim=c(-max(abs(fc)),max(abs(fc))), bty="n", col=rgb(red=100, green=100, blue=100, alpha=25, maxColorValue = 255))
+  axis(side=1, cex.axis=0.7)
+  axis(side=2, cex.axis=0.7, las=2, mgp=c(2.5, 0.8, 0))
+  
+  return(list(FC=fc,
+              p_val=p_val,
+              adj_p_val=adj_p_val,
+              mean_intensity=mean_intensity))
+}
+
+
+
+
+
+### PCA plot function ###
+PCA_plot <- function(m, colorfactor, main=""){
+  
+  # replace NAs with 0
+  m[is.na(m)] <- 0
+  
+  # berechne PCA
+  pca_res <- prcomp(t(m))
+  rot_mat <- pca_res$rotation
+  res_final <- as.matrix(scale(t(m), center=TRUE, scale=FALSE)) %*% rot_mat
+  eigenvectors <- pca_res$sdev^2
+  anteil_var_pca1 <- round(eigenvectors[1]/sum(eigenvectors),digits=3)
+  anteil_var_pca2 <- round(eigenvectors[2]/sum(eigenvectors),digits=3)
+  
+  ## create colorfactor
+  colorfactor <- as.factor(colorfactor)
+  colors <- rainbow(length(unique(colorfactor)))
+  names(colors) <- levels(colorfactor)
+  
+  #plot PCR
+  par(xpd=TRUE)
+  par(mfrow=c(1,1))
+  par(mar=c(5,5,5,7.5))
+  par(mgp=c(2,0.7,0))
+  
+  
+  plot(res_final[,"PC1"], res_final[,"PC2"], col=colors[colorfactor], pch=16, cex=2,lwd=3, yaxt="n", xaxt="n", ylab="", xlab="", main=main)
+  axis(side=2, cex.axis = 0.7)
+  axis(side=1, cex.axis = 0.7)
+  title(xlab=paste0("PC1  ","(",anteil_var_pca1*100,"%",")"), ylab=paste0("PC2  ","(",anteil_var_pca2*100,"%",")"), cex.lab=0.8)
+  par(xpd=TRUE)
+  legend("right", legend=names(colors), col=colors, bty="n", cex=1.5,pch=16, inset=-0.4)
+}
+
+
+
+
+### heatmap plot ###
+heatmap_plot <- function(m, colorfactor, samplenames){
+  
+  # create colorfactor
+  colorfactor <- as.factor(colorfactor)
+  colors <- rainbow(length(unique(colorfactor)))
+  names(colors) <- levels(colorfactor)
+  
+  # replaces NAs with 0
+  m[is.na(m)] <- 0
+  colnames(m) <- samplenames
+  
+  # plot heatmap
+  colors_pal <- colorRampPalette(pals::parula(40))
+  par(mfrow=c(1,1))
+  heatmap(m, Rowv = FALSE, Colv=FALSE, margins=c(9,9), cexCol = 1,scale="none",labRow="",col =colors_pal(40), ColSideColors = colors[colorfactor], cex.lab=2)
+}
+
+
+
+
+
+```
+
+
+
+
+
+
+
+
+
+```{r define/initiate required objects}
+
+n <- length(filepaths)
+intersection <- NULL
+list_df <- vector(mode="list", n)
+list_colname_reporters <- vector(mode="list", n)
+list_m_reporter <- vector(mode="list", n)
+list_m_reporter_ref <- vector(mode="list", n)
+list_m_reporter_ref_average <- vector(mode="list", n)
+list_ref_channel_index <- vector(mode="list", n)
+list_nonreporter <- vector(mode="list", n)
+list_normalization_factor <- vector(mode="list", n)
+list_m_reporter_normalized <- vector(mode="list", n)
+
+```
+
+
+```{r Read in data, compare overlap in key_column via Venn-diagramms, calculate intersecting features and reduce tables to only intersecting features}
+
+## read in data
+for (i in 1:n){
+  filepath_i <- filepaths[i]
+  list_df[[i]] <- read.delim(file=filepath_i, header=TRUE, sep="\t")
+}
+writeLines("dimensions of each file:")
+lapply(list_df, FUN=dim)
+
+
+## create venn-diagramm of overlaps in key_column
+list_key_column <- vector(mode="list", n)
+for (i in 1:n){
+  df_i <- list_df[[i]]
+  list_key_column[[i]] <- df_i[,key_column]
+}
+ggVennDiagram(list_key_column, category.names = plex_names) +
+  scale_fill_gradient(low="#FEE5D9",high = "#DE2D26")
+
+
+## calculate intersecting features 
+intersection <- do.call("intersect", args = list_key_column)
+
+
+## reduce to only intersecting features, and sort them
+for (i in 1:n){
+  df_i <- list_df[[i]]
+  df_i_red <- df_i[ df_i[,key_column] %in% intersection, ]
+  df_i_red <- df_i_red[order(df_i_red[,key_column]),]
+  list_df[[i]] <- df_i_red
+  print(df_i_red$Majority.protein.IDs[1:10])
+}
+
+
+
+```
+
+
+```{r Extract reporter ion intensity columns etc of each plex}
+
+
+for (i in 1:n){
+
+  # extract reporter ion columns as matrix, and save
+  df_i <- list_df[[i]]
+  colnames_reporter_i <- grep(names(df_i), pattern=rep_intensity_pattern, value = TRUE)
+  m_reporter_i <- as.matrix(df_i[,colnames_reporter_i])
+  list_m_reporter[[i]] <- m_reporter_i
+  
+  # save colnames of reporter ions
+  list_colname_reporters[[i]] <- colnames_reporter_i
+  
+  # extract reference channel columns index (within reporter ion matrix) as well as columns as matrix, and save 
+  bool_ref_i <- colnames_reporter_i %in% list_reference_channels[[i]]
+  list_ref_channel_index[[i]] <- which(bool_ref_i)
+  list_m_reporter_ref[[i]] <- df_i[, names(df_i) %in% list_reference_channels[[i]]]
+  
+  ## extract nonreporter columns, and save
+  df_nonreporter_i <- df_i[,! names(df_i) %in% colnames_reporter_i]
+  list_nonreporter[[i]] <- df_nonreporter_i
+  
+  # plot
+  if(is.null(list_samplenames)){
+    names <- NULL
+  } else { names <- list_samplenames[[i]]}
+  barplot(colSums(m_reporter_i, na.rm=TRUE),
+          col=c("grey", "turquoise")[as.numeric(as.factor(bool_ref_i))], border=c("grey", "turquoise")[as.numeric(as.factor(bool_ref_i))],
+          las=2, cex.names=0.7, main=paste0("Total channel intensity: ", plex_names[i]),
+          names.arg = names)
+  
+}
+
+
+
+```
+
+
+```{r IRS normalization via reference channels}
+
+## geometric mean function
+gm_mean = function(x){prod(x, na.rm = TRUE)^(1/length(x))}
+
+## Within each plex, calculate the average reference channel intensity for each feature. Then calculate the geometrix mean of average reference channel intensities between plexes
+for (i in 1:n){
+  m_ref_i <- as.matrix(list_m_reporter_ref[[i]])
+  list_m_reporter_ref_average[[i]] <- rowMeans(m_ref_i, na.rm = TRUE)
+}
+
+## calculate the geometric mean vector of all average reference channel intensities
+m_reporter_ref_average <- do.call("cbind", args=list_m_reporter_ref_average)
+gm_mean_vector <- apply(m_reporter_ref_average, MARGIN = 1, FUN=gm_mean)
+
+
+## calculate normalization factos as ratio between geometrix mean of all reference channels and individual plex reference averages
+for (i in 1:n){
+  list_normalization_factor[[i]] <- gm_mean_vector/list_m_reporter_ref_average[[i]]
+}
+
+
+## calculate normalized reporter intensities for each plex
+for (i in 1:n){
+  m_reporter_i <- list_m_reporter[[i]]
+  m_reporter_normalized_i <- sweep(m_reporter_i, MARGIN=1, FUN="*", STATS = list_normalization_factor[[i]] )
+  colnames(m_reporter_normalized_i) <- paste0("IRS_norm__", colnames(m_reporter_normalized_i))
+  list_m_reporter_normalized[[i]] <- m_reporter_normalized_i
+}
+
+```
+
+
+
+```{r Rename and aggregate to single dataframe}
+
+## aggregate multiple files to a single file
+exportlist_m_reporter <- vector(mode="list", n)
+exportlist_m_reporter_normalized <- vector(mode="list", n)
+exportlist_nonreporter <- vector(mode="list", n)
+
+for (i in 1:n){
+  
+  # prepare original intensities:
+  m_reporter_i <- list_m_reporter[[i]]
+  colnames(m_reporter_i) <- paste0(plex_names[i], "__", colnames(m_reporter_i))
+  exportlist_m_reporter[[i]] <- m_reporter_i
+  
+  # prepare normalized intensities:
+  m_reporter_normalized_i <- list_m_reporter_normalized[[i]]
+  colnames(m_reporter_normalized_i) <- paste0(plex_names[i],"__", colnames(m_reporter_normalized_i))
+  exportlist_m_reporter_normalized[[i]] <- m_reporter_normalized_i        
+  
+  # prepare all other non-intensity columns
+  df_nonreporter_i <- list_nonreporter[[i]]
+  names(df_nonreporter_i) <- paste0(plex_names[i], "__", colnames(df_nonreporter_i))
+  exportlist_nonreporter[[i]] <- df_nonreporter_i
+}
+
+m_reporter_all <- do.call("cbind",args=exportlist_m_reporter)
+m_reporter_normalized_all <- do.call("cbind", args=exportlist_m_reporter_normalized)
+df_nonprecursor_all <- do.call("cbind", args=exportlist_nonreporter)
+
+
+
+df_export <- data.frame(match_column = list_nonreporter[[1]][,key_column],
+                   as.data.frame(m_reporter_normalized_all),
+                   as.data.frame(m_reporter_all),
+                   df_nonprecursor_all)
+
+
+```
+
+
+
+```{r Calculate relevant variables}
+
+## calculate single group vector:
+groups_all <- do.call("c", args=list_groups)
+samplenames_all <- do.call("c", args=list_samplenames)
+
+
+```
+
+
+
+```{r PCA before and after IRS normalization}
+
+
+
+## PCA before IRS:
+PCA_plot(m=log2(m_reporter_all), colorfactor = factor(groups_all), main="before IRS")
+
+
+## PCA after IRS:
+PCA_plot(m=log2(m_reporter_normalized_all), colorfactor = factor(groups_all), main="after IRS")
+
+
+
+```
+
+
+
+
+
+```{r Heatmap after IRS}
+
+
+
+
+## calculate heatmap
+heatmap_plot(m=log2(m_reporter_normalized_all), colorfactor = as.factor(groups_all), samplenames=samplenames_all)
+
+
+
+```
+
+
+```{r OPTIONAL: do DE testing}
+
+# extract reporter intensity matrix
+m <- m_reporter_normalized_all
+
+# define groups
+groups_all
+
+
+## define groupname_1
+groupname1 <- "WT_naive"
+
+## define groupname_1
+groupname2 <- "KO_naive"
+
+
+## DE testing
+DE_res <- as.data.frame(DE_test(matrix_group1 = m[,groups %in% groupname1],
+                  matrix_group2 = m[,groups %in% groupname2]))
+
+## change colnames output and cbind it to dataframe
+names(DE_res) <- paste0(groupname1, "_vs_", groupname2, "__",names(DE_res))
+
+## add DE_res to dataframe
+df_export <- cbind(df_export, DE_res)
+
+
+```
+
+
+
+
+
+
+
+
+
+```{r export IRS-normalized data}
+
+## generate output table
+write.table(df_export, file = "IRS_normalized.txt", sep = "\t", col.names = TRUE, row.names=FALSE, quote=FALSE)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,46 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2580
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11920\viewh8400\viewkind0
+\pard\tx566\tx1133\tx1700\tx2267\tx2834\tx3401\tx3968\tx4535\tx5102\tx5669\tx6236\tx6803\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 ## Write DESeq normalization function (using DESeq's size factor estimation)\
+DESeq_norm <- function(m, sizefactors=NULL)\{\
+  \
+   library(DEseq2)\
+\
+  # create counts from intensity data in the required range\
+  m_copy <- m\
+  m_copy[is.na(m_copy)] <- 0\
+  m_counts <- round(log2(m_copy+1)*1000,digit=0)\
+  library(DESeq2)\
+  \
+  \
+  # if no sizefactors are supplied, calculate them based on data\
+  if (is.null(sizefactors))\{\
+    # create an object summarized experiment class\
+    dds <- DESeqDataSetFromMatrix(countData = m_counts,\
+                                  colData = data.frame(condition=rep("group",times=ncol(m_counts))),\
+                                  design =  ~ 1)\
+    \
+    # calculate normalization factors via DESeq's estimateSizeFactors(). Save them in working directory (so they can be used later on a different table of the same experiment if wanted) \
+    sizefactors <- estimateSizeFactors(dds)$sizeFactor\
+    if (!file.exists("Results"))\{\
+      dir.create("Results")\
+    \}\
+    save(sizefactors, file=paste0(getwd(),"/Results/sizefactors.Rdata"))\
+  \} else \{\
+    sizefactors=sizefactors\
+  \}\
+  \
+  \
+  # perform normalization by column-wise multiplication with size-factors\
+  m_counts_norm  <- sweep(m_counts, STATS=1/sizefactors, FUN="*", MARGIN = 2)\
+  \
+  # retransform to intensity range \
+  m_norm <- 2^(m_counts_norm/1000) - 1\
+  \
+  # return normalized intensity matrix\
+  return(m_norm)\
+\}}
