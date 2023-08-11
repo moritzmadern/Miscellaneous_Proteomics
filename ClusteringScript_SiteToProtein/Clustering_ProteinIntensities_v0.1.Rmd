@@ -93,7 +93,7 @@ colors_groups = set_names(x = c("#DDF2D1", "#68C5C7", "#369ABE", "#2A6CAF", "#25
 adj.pval_threshold = 0.05
 
 
-## Specify pearsons correlation coefficient threshold. Features with lower correlation to their respective cluster center will not be kicked out of their clusters.
+## Specify pearsons correlation coefficient threshold. Features with lower correlation to their respective cluster center will be kicked out of their clusters and instead be assigned to cluster 0
 corr_threshold = 0.85
 
 ## Specify maximum absolute log2 fold change for filtering (i.e. highest absolute log2 fold change across all groups). Features with maximum absolute log2 fold changes higher than the threshold pass the filter
