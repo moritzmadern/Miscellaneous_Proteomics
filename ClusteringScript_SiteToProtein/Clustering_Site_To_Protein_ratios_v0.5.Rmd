@@ -1,0 +1,1071 @@
+---
+title: "Clustering: T-cell activation Phosphorylome"
+author: "Moritz Madern"
+
+output:
+  html_document: 
+    toc: true
+    theme: united
+  pdf_document:
+   toc: yes  
+---
+
+<br><br><br><br>
+
+
+
+
+
+# Parameters
+
+```{r load packages etc.,  echo = FALSE, message = FALSE, warning = FALSE}
+
+## Load packages
+library(tidyverse)
+library(sva)
+library(clusterProfiler)
+library(enrichplot)
+library(DOSE)
+library(org.Mm.eg.db)
+library(gprofiler2)
+library(rlist)
+library(plotly)
+library(RColorBrewer)
+library(WGCNA)
+library(cluster)
+library(RColorBrewer)
+library(reshape2)
+library(ComplexHeatmap)
+library(circlize)
+library(msigdbr)
+
+
+## Other things
+mouse <- org.Mm.eg.db
+
+
+## Create Custom_Palette for profile plots per cluster
+customPalette <- colorRampPalette(colors=c("#12347E","#271A7C", "#441562","#6C1A49", "#89376E","#DE6C41"))
+customPalette <- colorRampPalette(colors=c("#FEFB53", "#479D83","#1334F1", "#7F27A7","#EA3323"))
+
+
+```
+
+```{r Set parameters}
+
+
+### 1) Specify general parameters ###
+
+## Specify filepath to site table (should already be filtered etc. and contain intensity columns ready to be clustered)
+filepath_sites = "Results/PhosphoSites_SiteToProtein_TcellActivation.txt"
+
+## Specify pattern of quantitative columns
+pattern_quant <- "__siteToProtein_IFadjust"
+
+## Specify sample groups 
+groups = c("naive", "naive", "naive", 
+           "30m","30m", "30m",
+           "2h", "2h", "2h",
+           "8h", "8h", "8h",
+           "24h", "24h", "24h")
+
+## Specify new sample names. If existing sample column names are to be taken, specify as NULL. Specified samplenames have to match inoput order in the table.Note: Make sure that those sample names do not already belong to other column names in you table!
+samplenames = c("naive.1", "naive.2", "naive.3", 
+                "30m.1","30m.2", "30m.3",
+                "2h.1", "2h.2", "2h.3",
+                "8h.1", "8h.2", "8h.3",
+                "24h.1", "24h.2", "24h.3")
+
+## Specify unique group colors (character vector with names that match group names)
+colors_groups = set_names(x = c("#DDF2D1", "#68C5C7", "#369ABE", "#2A6CAF", "#253494"),
+                         nm = "naive", "30m", "2h", "8h", "24h")  
+
+
+## Specify ANOVAp-value threshold for filtering (1 way ANOVA, y ~ groups). Features lower p-values pass the filter
+adj.pval_threshold = 0.05
+
+
+## Specify pearsons correlation coefficient threshold. Features with lower correlation to their respective cluster center will not be kicked out of their clusters.
+corr_threshold = 0.85
+
+## Specify maximum absolute log2 fold change for filtering (i.e. highest absolute log2 fold change across all groups). Features with maximum absolute log2 fold changes higher than the threshold pass the filter
+max_abs_log2_FC_threshold = log2(1.33) %>% abs()
+
+
+
+
+### 2) specify parameters specific to k-means clustering of data ###
+
+## Specify number of k-means clusters k
+k_kmeans= 4
+
+
+
+
+### 3) Specify parameters specific to WGCNA clustering of data ###
+
+## specify soft threshold (power) beta for wgcna network construction
+wgcna_beta = 4
+
+## Specify minimum module size
+minModuleSize = 160
+
+
+
+
+
+### 4) Specify parameters specific to ORA enrichment/overrepresentation analysis. 
+
+## specify which clusters should be tested for enrichment (possible input: "WGCNA", "kmeans", NULL) via overrepresentation analysis
+selected_clusters_ORA <- "WGCNA"
+
+## Specify filepath to proteinGroups table (used as part of the background in enrichment testing)
+filepath_proteinGroups = "../ResultTables_Repository/aggregated_proteinGroups_TcellActivation.txt"
+
+## Specify filepath to AcetylSites table (used as part of the background in enrichment testing)
+filepath_acetylSites = "../ResultTables_Repository/aggregated_Acetyl (K)Sites.txt"
+
+## Specify filepath to PhosphoSites table (used as part of the background in enrichment testing)
+filepath_phosphoSites = "../ResultTables_Repository/aggregated_Phospho (STY)Sites.txt"
+
+```
+
+```{r Write required functions etc,  echo = FALSE, message = FALSE, warning = FALSE}
+
+## write functions that extracts summary statistics for all replicates within groups 
+extract_summaryStats <- function(m, groups, FUN="median"){
+  m <- m_log %>% as.matrix()
+  res_list <- lapply(split(m, seq(nrow(m))),  FUN=function(x){
+    res_summaryStat <- tapply(x, INDEX=groups, FUN=FUN, na.rm=TRUE)[unique(groups)]
+    return(res_summaryStat)
+  })
+  res <- do.call(what="rbind", args=res_list)
+  return(res)
+}
+
+
+
+## Create folder geneLists storing genes name info per k-means cluster
+if (!"Lists_kMeans" %in% list.files("./Results")){
+    dir.create("./Results/Lists_kMeans")
+}
+
+
+## Create folder Fig_kmeans storing images of k-means cluster
+if (!"Fig_kmeans" %in% list.files("./Results")){
+    dir.create("./Results/Fig_kmeans")
+}
+
+
+## Create folder geneLists storing genes name info per wgcna cluster
+if (!"Lists_wgcna" %in% list.files("./Results")){
+    dir.create("./Results/Lists_wgcna")
+}
+
+## Create folder Fig_wgcna storing images of wgcna cluster
+if (!"Fig_wgcna" %in% list.files("./Results")){
+    dir.create("./Results/Fig_wgcna")
+}
+
+```
+
+```{r Read in data etc., echo = FALSE, message = FALSE, warning = FALSE}
+
+## Read in data etc
+df <- read.delim(file=filepath_sites, header=TRUE, sep="\t", check.names = FALSE)
+
+
+
+## Filter out rows with empty fasta headers
+df <- df[df$Fasta.headers != "",]
+
+
+## Find representative protein names from FASTA headers (first Swissprot entry if listed; else first Tremble entry listed)
+df$Protein.names_first <- df$Fasta.headers %>%  sapply(FUN=function(text){
+                                                             if (text == "") return("")
+                                                             if (grepl(text, pattern="sp[|]")){
+                                                               ind_sp <- regexpr(text, pattern="sp[|]")
+                                                               if (ind_sp == 1){
+                                                                 res <- sub(text, pattern = "sp[|]", replacement = "")
+                                                               } else{
+                                                                 res <- sub(text, pattern = ".*sp[|]", replacement = "")
+                                                               }
+                                                               res <- sub(res, pattern="[|].*", replacement = "")
+                                                               return(res)
+                                                             } else{
+                                                               res <- sub(text, pattern = "tr[|]", replacement = "")
+                                                               res <- sub(res, pattern="[|].*", replacement = "")
+                                                               return(res)
+                                                             }
+                                                          })
+
+## Find representative gene names from Gene names column (first entry that is does not start with "Gm")
+df$Gene.names_first <- df$Gene.names %>%  sapply(FUN=function(text){
+                                                        if (text == "") return("")
+                                                        if (!grepl(text, pattern=";")){
+                                                          res <- sub(x=text, pattern=";.*$", replacement="")
+                                                          return(res)
+                                                        } else {
+                                                          res <- strsplit(x=text, split=";") %>% unlist()
+                                                          # find the entries that are not empty, and do not start with "Gm"
+                                                          bool_Gm <- grepl(res, pattern="^Gm")
+                                                          bool_empty <- res == ""
+                                                          res_ideal <- res[!(bool_Gm) &  !bool_empty ]
+                                                          if (length(res_ideal) > 1){
+                                                            return(res_ideal[1])
+                                                          } else { return(res[1]) }
+                                                        }
+                                                      })
+
+## Add ENTREZ gene IDs to df
+df$entrezID <- mapIds(mouse, keys = df$Protein.names_first, keytype = "UNIPROT", column = "ENTREZID", multiVals="first")
+
+
+```
+
+```{r Extract quantitative columns and subselect if wanted, echo = FALSE, message = FALSE, warning = FALSE}
+
+## Extract quantitative columns
+m <- df[,grepl(names(df), pattern=pattern_quant)] %>% as.matrix(.)
+rownames(m) <- df$unique.identifier
+
+
+## Extract non-quantitative columns (that do not match specified quantitative pattern)
+df_meta <- df[,!grepl(names(df), pattern=pattern_quant)]
+
+
+## If samplenames are specified, change column names to samplenames. Else, take existing column names as samplenames
+if(is.null(samplenames)){
+  samplenames <- colnames(m)
+} else {
+  colnames(m) <- samplenames
+}
+
+```
+
+<br><br><br><br>
+
+
+
+
+
+
+# Filtering based on ANOVA p-value
+
+```{r ANOVA and p-value-based filtering, echo = FALSE, message = FALSE, warning = FALSE, fig.align="center", fig.path='fig_kmeansClustering/', dev=c('png', 'pdf')}
+
+## Make copy, then replaces NAs with minimum value
+m_copy <- m
+m_copy[is.na(m_copy)] <- min(m_copy, na.rm=TRUE)
+
+
+## Calculate One-way anova for each row in m
+df_meta$ANOVApval <- apply(m_copy, MARGIN = 1, FUN=function(x){
+                      x <- as.numeric(x)
+                      res <- aov(x ~ groups)
+                      if (!is.null(summary(res)[[1]]$"Pr(>F)"[1])){
+                        return(summary(res)[[1]]$"Pr(>F)"[1]) 
+                      } else {return (NA)}
+                    })
+
+
+## Calculate adjusted ANOVA p-values
+df_meta$adj.ANOVApval <- p.adjust(p=df_meta$ANOVApval, method="BH")
+
+
+## Overview of p-values
+hist(df_meta$ANOVApval, breaks=20, col="grey", border="grey", main="ANOVA p-value histogramm", xlab="p-value")
+hist(df_meta$adj.ANOVApval, breaks=20, col="orange", border="orange", main="ANOVA adj. p-value histogramm", xlab="adj. p-value")
+
+
+## Perform filtering based on adj. p-value cutoff
+writeLines("Chosen adj. p-value threshold: ")
+print(adj.pval_threshold)
+writeLines("Number of rows (sites) before p-value filtering:")
+nrow(df_meta)
+bool_keep <- df_meta$adj.ANOVApval < adj.pval_threshold
+barplot(table(bool_keep), main="passing adj.ANOVA p-value threshold", col="grey", border="grey")
+bool_keep <- bool_keep
+df_meta <- df_meta[bool_keep,]
+m <- m[bool_keep,]
+writeLines("Number of rows (sites) after p-value filtering:")
+nrow(df_meta)
+
+
+## Document in unfiltered table df which site features (rows) have been filtered out etc
+df$FeatureCategory <- "nonDE"
+df$FeatureCategory <- ifelse(df$unique_site_identifier %in% df_meta$unique_site_identifier, yes="DE_minimalChange", no = df$FeatureCategory)
+
+```
+
+<br><br><br><br>
+
+
+
+
+
+# Filtering based on maximum absolute log2 median FC
+
+```{r filter for highly-differentially abundant features based on maximum absolute log2 median FC, echo = FALSE, message = FALSE, warning = FALSE, fig.align="center", fig.path='fig_kmeansClustering/', dev=c('png', 'pdf')}
+
+## Calculate maximum absolute log2 FC
+df_meta$max_abs_log2_FC <- apply(m, MARGIN = 1, FUN=function(x){
+                                                              x <- as.numeric(x)
+                                                                  res <- tapply(x, INDEX=groups, FUN=median) %>% log2() %>% abs() %>% max(., na.rm = TRUE)
+                                                                  return(res)
+                                                              })
+
+## Plot overview of maximum absolute log2 FC, as well as cutoff
+hist(df_meta$max_abs_log2_FC, breaks=50, xlab="maximum absolute log2 median FC", main="", border="grey", col="grey")
+abline(v=max_abs_log2_FC_threshold, col="red", lty="dashed", lwd=2)
+
+
+## Filter based on cutoff (determined in parameter section)
+writeLines("Chosen maximum absolute log2 median FC cutoff: ")
+print(max_abs_log2_FC_threshold)
+writeLines(paste0("Number of rows (sites) before filtering: ",nrow(df_meta)))
+bool_keep <- df_meta$max_abs_log2_FC > max_abs_log2_FC_threshold
+df_meta <- df_meta[bool_keep,]
+m <- m[bool_keep,]
+writeLines(paste0("Number of rows (sites) after filtering: ",nrow(df_meta)))
+
+
+## Document in unfiltered table df which site features (rows) have been filtered out etc
+df$FeatureCategory <- ifelse(df$unique_site_identifier %in% df_meta$unique_site_identifier, yes="highly_DE", no = df$FeatureCategory)
+
+```
+
+<br><br><br><br>
+
+
+
+
+
+
+# k-means clustering
+
+Note that for the clustering, measurements for replicates within groups are summarized to a single summary-statistic (per default: median). That means that, if you have 5 groups of 3 replicates each, the clustering will be performed on the 5 group median values.
+
+### k-means: optimal k in k-means clustering
+
+```{r Optimal k, echo = FALSE, message = FALSE, warning = FALSE, fig.align="center", fig.path='Results/fig_kmeans/', dev=c('png', 'pdf')}
+
+## Perform k-means clustering with different number of clusters
+k_test <- 2:20
+N <- nrow(m)
+within_ss <- numeric(length(k_test))
+m_log <- log2(m)
+m_log[is.na(m_log)] <- quantile(m_log, probs=0.01, na.rm = TRUE)
+m_log_summ <- extract_summaryStats(m=m_log, groups=groups, FUN="median")
+names(within_ss) <- k_test
+for (k in k_test){
+  KM_k <- kmeans(m_log_summ,k ,iter.max = 10, nstart=10)
+  within_ss[as.character(k)] <- sum(KM_k$withinss)
+}
+
+
+## Plot sum of squares vs k
+writeLines("Empirically checking for optimal number of clusters (k) via elbow-plot :")
+par(mfrow=c(1,1))
+par(mgp=c(2.5,1,0))
+plot(y=within_ss,x=k_test,cex.main=0.8, cex.main=0.8,yaxt="n", xaxt="n", pch=16, ylab="", xlab="", type="n")
+points(y=within_ss,x=k_test, col="#E69F00", pch=16, cex=1.5)
+lines(y=within_ss,x=k_test, lty = 3)
+axis(side=2, cex.axis=0.6, mgp=c(0,0.7,0), las=2, lwd.ticks=0.5)
+axis(side=1, cex.axis=0.6, mgp=c(0,0.4,0), lwd.ticks=0.5, at=2:20)
+title(ylab="residual sum of squares", xlab="number of clusters k", main="Elbow-plot")
+
+```
+
+### k-means: clustering
+
+Note: Features that don't fit too well to their respective cluster center (as determined via pearosn correlation coefficient) will be assigned to a new cluster labelled 0.
+
+```{r kmeans clustering , echo = FALSE, message = FALSE, warning = FALSE, fig.align="center", fig.path='Results/fig_kmeans/', dev=c('png', 'pdf'), fig.width=4.5, fig.height=4}
+
+## Set seed
+set.seed(123)
+
+
+## Perform k-means clustering with specified k
+writeLines("Chosen k: ")
+print(k_kmeans)
+writeLines("Chosen minimum pearson correlation threshold: ")
+print(corr_threshold)
+
+
+## Perform k-means clustering with chosen number of clusters k
+k <- k_kmeans
+m_log <- log2(m)
+m_log[is.na(m_log)] <- quantile(m_log, probs=0.01, na.rm = TRUE)
+m_log_summ <- extract_summaryStats(m=m_log, groups=groups, FUN="median")
+KM <- kmeans(m_log_summ, k, iter.max = 10, nstart=10)
+centers <- KM$centers
+clusters <- KM$cluster
+table_n <- table(clusters)
+m_log <- log2(m)
+
+
+## For each feature, calculate pearsons correlation coefficient to respective cluster center. Plot Histogram. Save value
+v_pearson_r <- numeric(nrow(m_log))
+for (i in 1:nrow(m_log_summ)){
+  
+  # extract cluster center of feature i
+  center_i <- centers[clusters[i],]
+  
+  # extract profile of feature i
+  m_i <- m_log_summ[i,]
+  
+  # calculate correlation
+  v_pearson_r[i] <- cor(x=center_i, m_i, method="pearson", use="pairwise.complete.obs")
+}
+writeLines("Chosen pearson correlation coefficient cutoff: ")
+print(corr_threshold)
+writeLines("Distribution of correlations between features and respective cluster centers:")
+hist(v_pearson_r, breaks=50, main="pearson correlation to cluster centers", xlab="pearsons r")
+abline(v=corr_threshold, col="red", lwd=2)
+df_meta$kMeans_pearson_r <- v_pearson_r
+
+
+## Kick out features that don't correlate well with their respective cluster center
+clusters[v_pearson_r < corr_threshold] <- 0
+
+
+## Add center for cluster 0
+m_0 <- m_log_summ[clusters==0,]
+center_0 = matrix(colMeans(m_0, na.rm = TRUE), nrow=1)
+
+
+## Give overview of cluster sizes
+writeLines("Overview of cluster sizes:")
+barplot(table(clusters), ylab="number", xlab="cluster label")
+writeLines("Note that cluster 0 contains all the features with correlations that did not pass the filter")
+
+
+## Prepare some variables for plotting
+par(mar=c(6.5,4.5,4,5))
+par(mgp=c(3,1,0))
+# min_y <- quantile(m_log, probs=0.001, na.rm = TRUE)
+# max_y <- quantile(m_log, probs=0.999, na.rm = TRUE)
+colors_kmeans <- colors_groups[unique(groups)]
+x_axis <- 1:ncol(centers)
+table_n <- table(clusters)
+
+
+## Go over each cluster and plot profiles
+for (i in 0:k){ 
+  
+  # plot ggplot and save
+  if (i > 0){
+    center_i = centers[i,]
+  } else {
+    center_i <- center_0
+  }
+  bool_i <- clusters == i
+  m_i <- m_log_summ[bool_i,, drop=FALSE]
+  df_wide <- cbind(row_id=rownames(m_i), as.data.frame(m_i), pearson_r=v_pearson_r[bool_i])
+  df_long <- melt(data=df_wide, value.name = "Ratio",id.vars = c("row_id","pearson_r"))
+  df_long <- df_long[order(df_long$pearson_r, decreasing = FALSE),]
+  df_long$row_id <- factor(df_long$row_id, levels=unique(df_long$row_id))
+  gg <- ggplot(data=df_long) +
+        geom_line(aes(x=variable, y=Ratio, group = row_id, col=pearson_r), size=0.75) +
+        scale_color_gradientn(colors=customPalette(100), limits=c(0.85, 1)) + theme_bw() + ylab("Site/protein [log2]") + xlab("time") + 
+        scale_x_discrete(expand=c(0.04,0.04)) +
+        ggtitle(paste0("Cluster",i, " (n=",nrow(m_i), ")" )) +
+        theme(plot.title = element_text(hjust = 0.5)) + theme(aspect.ratio=1)
+  print(gg)
+  ggsave(plot=gg, filename = paste0("Results/Fig_kmeans/Cluster_", i,".pdf"), width=4, height=3.3) 
+}
+
+
+## Add clusters to dataframe df_meta_centered
+df_meta$kmeans_cluster <- clusters
+
+```
+
+```{r Write gene name list for each k-means cluster, echo = FALSE, message = FALSE, warning = FALSE}
+
+## Create filepath
+wd <- getwd()
+cluster_filepath <- paste0(wd, "/Results/Lists_kMeans/")
+    
+
+## Create txt files with gene names etc for of each cluster
+k <- max(df_meta$kmeans_cluster)
+for (i in 0:k){
+  filepath_GeneNames_k <- paste0(cluster_filepath, "/GeneNames_kMeansCluster_", i, ".txt")
+  filepath_SiteNames_k <- paste0(cluster_filepath, "/SiteNames_kMeansCluster_", i, ".txt")
+  filepath_ProteinNames_k <- paste0(cluster_filepath, "/ProteinNames_kMeansCluster_", i, ".txt")
+  write.table(unique(df_meta$Gene.names_first[df_meta$kmeans_cluster == i]), file=filepath_GeneNames_k, row.names = FALSE, col.names = FALSE, quote=FALSE)
+  write.table(unique(df_meta$unique_site_identifier[df_meta$kmeans_cluster == i]), file=filepath_SiteNames_k, row.names = FALSE, col.names = FALSE, quote=FALSE)
+  write.table(unique(df_meta$Protein.names_first[df_meta$kmeans_cluster == i]), file=filepath_ProteinNames_k, row.names = FALSE, col.names = FALSE, quote=FALSE)
+}
+
+
+## Document in unfiltered table df which site features (rows) fall in which cluster
+v_df_Cluster <- setNames(character(nrow(df)), nm=df$unique_site_identifier)
+v_df_Cluster[as.character(df_meta$unique_site_identifier)] <- df_meta$kmeans_cluster
+df$kmeans_cluster <- v_df_Cluster
+table(df$FeatureCategory, df$kmeans_cluster)
+df_meta$kmeans_cluster %>% table() %>% sum()
+
+```
+
+<br><br><br><br>
+
+
+
+
+
+
+# WGCNA clustering
+
+Note that for the clustering, measurements for replicates within groups are summarized to a single summary-statistic (per default: median). That means that, if you have 5 groups of 3 replicates each, the clustering will be performed on the 5 group median values.
+
+### WGCNA: optimal soft threshold beta (power)
+
+```{r check soft threshold power (beta), echo = FALSE, message = FALSE, warning = FALSE, fig.align="center", fig.path='Results/fig_WGCNA/', dev=c('png', 'pdf')}
+
+## Set seed
+set.seed(123)
+
+
+## Print chosen parameters
+writeLines("Chosen power (beta): ")
+print(wgcna_beta)
+
+
+##  Prepare quantitative dataframe for wgcna package (needs to be transposed, i.e.: rows are samples/groups and columns are genes)
+par(mar=c(6.5,4.5,4,5))
+par(mgp=c(3,1,0))
+m_log <- log2(m)
+m_log[is.na(m_log)] <- quantile(m_log, probs=0.01, na.rm = TRUE)
+m_log_summ <- extract_summaryStats(m=m_log, groups=groups, FUN="median")
+df_expr <- t(m_log_summ) %>% as.data.frame()
+
+
+## Probe different powers. Plot the results (scale-free topology model fit as well as median connectivity)
+powers <- 1:20
+sft <- pickSoftThreshold(df_expr, powerVector = powers, networkType = "signed")
+plot(x = sft$fitIndices$Power, y = -sign(sft$fitIndices$slope)*sft$fitIndices$SFT.R.sq,
+     xlab ="soft Threshold beta (power)", ylab = "Scale Free Topology Model Fit, signed R-squared", type="n" )
+text(x = sft$fitIndices$Power, y = -sign(sft$fitIndices$slope)*sft$fitIndices$SFT.R.sq, labels=powers, cex=0.9, col="red")
+plot(x = sft$fitIndices$Power, y = sft$fitIndices$median.k.,
+     xlab="soft threshold beta (power)", ylab = "median network connectivity", type="n")
+text(x = sft$fitIndices$Power, y = sft$fitIndices$median.k., labels=powers, cex=0.9, col="red")
+
+```
+
+Note: The autors advise choosing the lowest power for which the scale-free topology fit signed R-squared curve flattens upon reaching a high value (even if afterwards it increases again). Alternatively, where median connectivity starts to flatten/curve into a linear relationship (i.e. elbow). This beta then provides a network that most closely resembles a scale-free topology, i.e. where a few nodes undertake the major laod of connectivity.
+
+### WGCNA: construct network and obtain clusters
+
+Note: This clustering procedure is at core a hyrarchical clustering based on an adjacency matrix, implementing an arbitrary cutoff for the tree.
+
+```{r WGCNA , echo = FALSE, message = FALSE, warning = FALSE, fig.align="center", fig.path='Results/fig_WGCNA/', dev=c('png', 'pdf'), fig.width=4.5, fig.height=4}
+
+## calculate network
+set.seed(123)
+net <- blockwiseModules(df_expr, power = wgcna_beta, minModuleSize = minModuleSize,
+                        numericLabels = TRUE, networkType = "signed", minKMEtoStay = 0.6)
+
+
+##  prepare some variables for plotting
+clusters <- net$colors
+centers <- matrix(ncol=nrow(df_expr), nrow=length(unique(net$colors)))
+colnames(centers) <- unique(groups)
+rownames(centers) <- sort(unique(clusters))
+v_pearson_r <- numeric(nrow(df_meta))
+
+
+## Go over each cluster and calculate cluster center
+for (i in sort(unique(clusters))){ 
+  
+  # plot cluster center + individual transcript abundance patterns
+  bool_i <- clusters == i
+  m_i <- m_log_summ[bool_i,, drop=FALSE]
+
+  ## calculate cluster center
+  centers[as.character(i),] <- colMeans(m_i, na.rm = TRUE)
+}
+
+
+## For each feature, calculate pearsons correlation coefficient to respective cluster center. Plot Histogram. Save value
+v_pearson_r <- numeric(nrow(df_meta))
+for (i in 1:nrow(m_log_summ)){
+  
+  # extract cluster center of feature i
+  center_i <- centers[as.character(clusters[i]),]
+  
+  # extract profile of feature i
+  m_i <- m_log_summ[i,]
+  
+  # calculate correlation
+  v_pearson_r[i] <- cor(x=center_i, m_i, method="pearson", use="pairwise.complete.obs")
+}
+writeLines("Chosen pearson correlation coefficient cutoff: ")
+print(corr_threshold)
+writeLines("Distribution of correlations between features and respective cluster centers:")
+hist(v_pearson_r, breaks=50, main="pearson correlation to cluster centers", xlab="pearsons r")
+abline(v=corr_threshold, col="red", lwd=2)
+df_meta$wgcna_pearson_r <- v_pearson_r
+
+
+## Kick out features that don't correlate well with their respective cluster center
+clusters[v_pearson_r < corr_threshold] <- 0
+
+
+## Overview of cluster sizes
+table_n <- table(clusters)
+writeLines("Overview of cluster sizes")
+table_n
+
+
+## Go over each cluster and plot profiles
+for (i in sort(unique(clusters))){ 
+
+  # plot ggplot and save
+  center_i = centers[as.character(i),]
+  bool_i <- clusters == i
+  m_i <- m_log_summ[bool_i,, drop=FALSE]
+  df_wide <- cbind(row_id=rownames(m_i), as.data.frame(m_i), pearson_r=v_pearson_r[bool_i])
+  df_long <- melt(data=df_wide, value.name = "Ratio",id.vars = c("row_id","pearson_r"))
+  df_long <- df_long[order(df_long$pearson_r, decreasing = FALSE),]
+  df_long$row_id <- factor(df_long$row_id, levels=unique(df_long$row_id))
+  gg <- ggplot(data=df_long) +
+        geom_line(aes(x=variable, y=Ratio, group = row_id, col=pearson_r), size=0.75) +
+        scale_color_gradientn(colors=customPalette(100), limits=c(0.85, 1)) + theme_bw() + ylab("Site/protein [log2]") + xlab("time") +
+        scale_x_discrete(expand=c(0.04,0.04)) +
+        ggtitle(paste0("Cluster",i, " (n=",nrow(m_i), ")" )) +
+        theme(plot.title = element_text(hjust = 0.5)) + theme(aspect.ratio=1)
+  print(gg)
+  ggsave(plot=gg, filename = paste0("Results/Fig_wgcna/Cluster_", i,".pdf"), width=4, height=3.3) 
+}
+
+
+## Add clusters to dataframe df_meta_centered
+df_meta$wgcna_cluster <- clusters
+
+```
+
+```{r Write gene name list for each wgcna cluster, echo = FALSE, message = FALSE, warning = FALSE}
+
+## Create filepath
+wd <- getwd()
+cluster_filepath <- paste0(wd, "/Results/Lists_wgcna/")
+    
+
+## Create txt files with gene names etc for of each cluster
+for (i in unique(df_meta$wgcna_cluster)){
+  filepath_GeneNames_k <- paste0(cluster_filepath, "/GeneNames_wgcnaCluster_", i, ".txt")
+  filepath_SiteNames_k <- paste0(cluster_filepath, "/SiteNames_wgcnaCluster_", i, ".txt")
+  filepath_ProteinNames_k <- paste0(cluster_filepath, "/ProteinNames_wgcnaCluster_", i, ".txt")
+  write.table(unique(df_meta$Gene.names_first[df_meta$wgcna_cluster == i]), file=filepath_GeneNames_k, row.names = FALSE, col.names = FALSE, quote=FALSE)
+  write.table(unique(df_meta$unique_site_identifier[df_meta$wgcna_cluster == i]), file=filepath_SiteNames_k, row.names = FALSE, col.names = FALSE, quote=FALSE)
+  write.table(unique(df_meta$Protein.names_first[df_meta$wgcna_cluster == i]), file=filepath_ProteinNames_k, row.names = FALSE, col.names = FALSE, quote=FALSE)
+}
+
+
+## Document in unfiltered table df which site features (rows) fall in which cluster
+v_df_Cluster <- setNames(character(nrow(df)), nm=df$unique_site_identifier)
+v_df_Cluster[as.character(df_meta$unique_site_identifier)] <- df_meta$wgcna_cluster
+df$wgcna_cluster <- v_df_Cluster
+table(df$FeatureCategory, df$wgcna_cluster)
+
+```
+
+```{r export final table, echo = FALSE, message = FALSE, warning = FALSE}
+
+## Save filtered as well as unfiltered table
+write.table(df_meta, file=paste0(wd,"/Results/ResultTable_Clustering_filtered.txt"), row.names = FALSE, col.names = TRUE, quote=FALSE, sep="\t")
+write.table(df, file=paste0(wd,"/Results/ResultTable_Clustering_unfiltered.txt"), row.names = FALSE, col.names = TRUE, quote=FALSE, sep="\t")
+
+```
+
+<br><br><br><br>
+
+
+
+
+
+
+# Complex Heatmap
+
+```{r}
+
+## Create complex heatmap on all quantified site features, splitting into categories (clusters included). 
+writeLines("complex Heatmap will consider the following clustering results:")
+print(selected_clusters_ORA)
+
+
+## modify FeatureCategoy column
+if (selected_clusters_ORA == "WGCNA"){
+  df$FeatureCategory <- ifelse(df$FeatureCategory == "highly_DE", yes=df$wgcna_cluster, no=df$FeatureCategory )
+}
+if (selected_clusters_ORA == "kmeans"){
+  df$FeatureCategory <- ifelse(df$FeatureCategory == "highly_DE", yes=df$kmeans_cluster, no=df$FeatureCategory )
+}
+table(df$FeatureCategory)
+
+
+## Prepare complex heatmap variables
+colors_heatmap <- rev(brewer.pal(11, "RdBu"))
+colors_heatmap[6] <- "#fffec8"
+heatmap_pal <- colorRampPalette(colors_heatmap)
+rdbu_colors = heatmap_pal(20)[2:19]
+heatmap_pal <- colorRampPalette(rdbu_colors)
+col_fun = colorRamp2(breaks = seq(from=-0.8,to=0.8, length.out=51),
+                     colors = heatmap_pal(51))
+top_annotation = HeatmapAnnotation(Timepoint = groups, col = list(Timepoint = colors_groups))
+m_heatmap <- df[,grepl(names(df), pattern=pattern_quant)] %>% as.matrix(.) %>% log2(.)
+rownames(m_heatmap) = NULL
+colnames(m_heatmap) <- samplenames
+
+
+## Convert FeatureCategory to factor
+levels_numeric <- df$FeatureCategory %>% unique() %>% as.numeric() 
+levels_numeric <- levels_numeric[!is.na(levels_numeric)] %>% sort() %>% as.character(.)
+df$FeatureCategory <- factor(df$FeatureCategory, levels = c("nonDE","DE_minimalChange", levels_numeric))
+
+
+## plot heatmap via complexHeatmap package
+c_heatmap <- ComplexHeatmap::Heatmap(matrix = m_heatmap, name="log2 ratio", col=col_fun, cluster_columns = FALSE,
+                                     column_split = factor(groups, levels =unique(groups)),
+                                     row_split = df$FeatureCategory,
+                                     cluster_row_slices = FALSE, row_title_rot = 0, top_annotation = top_annotation, right_annotation =NULL,
+                                     row_gap = unit(1.2, "mm"), column_gap = unit(1.2, "mm"), use_raster = FALSE)
+
+
+
+
+pdf("Results/Heatmap_SiteToProtein_ClusteringResults.pdf", height=6.5, width=6)
+c_heatmap
+dev.off()
+
+```
+
+<br><br><br><br>
+
+
+
+
+
+
+
+
+
+
+
+
+# Overrepresentation Analysis
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+## Perform Overrepresenation Analysis (ORA) and Complex Heatmap on the following clusters:
+writeLines("ORAs performed on the following clusters: ")
+print(selected_clusters_ORA)
+
+
+## Create Cnew dataframe df_clusters from filtered df_meta and add clusters column based on selection
+df_clusters <- df_meta
+if (selected_clusters_ORA == "WGCNA"){
+  df_clusters$Clusters <- df_clusters$wgcna_cluster
+}
+if (selected_clusters_ORA == "kmeans"){
+  df_clusters$Clusters <- df_clusters$kmeans_cluster
+}
+
+```
+
+For the Overrepresentation Analysis (ORA), we need to create background list to ensure unbiased results. The following code block generates background lists from all proteins quantified in the experiment, here compiled from the various tables listing unmodified peptides (i.e. "proteome"), acetyl-peptides and phospho-peptides. Adjust the following code block accordingly if your experiment is different!
+
+```{r Read in all original tables to generate your background lists (gene symbols, uniprot IDs and ENTREZ IDs)}
+
+## Read in all relevant tables 
+df_prot <- read.delim(filepath_proteinGroups, header=TRUE, sep="\t")
+df_acet <- read.delim(filepath_acetylSites, header=TRUE, sep="\t")
+df_phospho <- read.delim(filepath_phosphoSites, header=TRUE, sep="\t")
+
+
+## Extract first gene names from Gene names entry
+df_prot$Gene.names_first <- df_prot$Gene.names %>%  sapply(FUN=function(text){
+                                                        if (text == "") return("")
+                                                        if (!grepl(text, pattern=";")){
+                                                          res <- sub(x=text, pattern=";.*$", replacement="")
+                                                          return(res)
+                                                        } else {
+                                                          res <- strsplit(x=text, split=";") %>% unlist()
+                                                          # find the entries that are not empty, and do not start with "Gm"
+                                                          bool_Gm <- grepl(res, pattern="^Gm")
+                                                          bool_empty <- res == ""
+                                                          res_ideal <- res[!(bool_Gm) &  !bool_empty ]
+                                                          if (length(res_ideal) > 1){
+                                                            return(res_ideal[1])
+                                                          } else { return(res[1]) }
+                                                        }
+                                                      })
+df_acet$Gene.names_first <- df_acet$Gene.names %>%  sapply(FUN=function(text){
+                                                        if (text == "") return("")
+                                                        if (!grepl(text, pattern=";")){
+                                                          res <- sub(x=text, pattern=";.*$", replacement="")
+                                                          return(res)
+                                                        } else {
+                                                          res <- strsplit(x=text, split=";") %>% unlist()
+                                                          # find the entries that are not empty, and do not start with "Gm"
+                                                          bool_Gm <- grepl(res, pattern="^Gm")
+                                                          bool_empty <- res == ""
+                                                          res_ideal <- res[!(bool_Gm) &  !bool_empty ]
+                                                          if (length(res_ideal) > 1){
+                                                            return(res_ideal[1])
+                                                          } else { return(res[1]) }
+                                                        }
+                                                      })
+df_phospho$Gene.names_first <- df_phospho$Gene.names %>%  sapply(FUN=function(text){
+                                                        if (text == "") return("")
+                                                        if (!grepl(text, pattern=";")){
+                                                          res <- sub(x=text, pattern=";.*$", replacement="")
+                                                          return(res)
+                                                        } else {
+                                                          res <- strsplit(x=text, split=";") %>% unlist()
+                                                          # find the entries that are not empty, and do not start with "Gm"
+                                                          bool_Gm <- grepl(res, pattern="^Gm")
+                                                          bool_empty <- res == ""
+                                                          res_ideal <- res[!(bool_Gm) &  !bool_empty ]
+                                                          if (length(res_ideal) > 1){
+                                                            return(res_ideal[1])
+                                                          } else { return(res[1]) }
+                                                        }
+                                                      })
+
+
+## Extract first Uniprot protein ID from fasta header
+df_prot$Protein.names_first <- df_prot$Fasta.headers %>%  sapply(FUN=function(text){
+                                                             if (text == "") return("")
+                                                             if (grepl(text, pattern="sp[|]")){
+                                                               ind_sp <- regexpr(text, pattern="sp[|]")
+                                                               if (ind_sp == 1){
+                                                                 res <- sub(text, pattern = "sp[|]", replacement = "")
+                                                               } else{
+                                                                 res <- sub(text, pattern = ".*sp[|]", replacement = "")
+                                                               }
+                                                               res <- sub(res, pattern="[|].*", replacement = "")
+                                                               return(res)
+                                                             } else{
+                                                               res <- sub(text, pattern = "tr[|]", replacement = "")
+                                                               res <- sub(res, pattern="[|].*", replacement = "")
+                                                               return(res)
+                                                             }
+                                                          })
+df_acet$Protein.names_first <- df_acet$Fasta.headers %>%  sapply(FUN=function(text){
+                                                             if (text == "") return("")
+                                                             if (grepl(text, pattern="sp[|]")){
+                                                               ind_sp <- regexpr(text, pattern="sp[|]")
+                                                               if (ind_sp == 1){
+                                                                 res <- sub(text, pattern = "sp[|]", replacement = "")
+                                                               } else{
+                                                                 res <- sub(text, pattern = ".*sp[|]", replacement = "")
+                                                               }
+                                                               res <- sub(res, pattern="[|].*", replacement = "")
+                                                               return(res)
+                                                             } else{
+                                                               res <- sub(text, pattern = "tr[|]", replacement = "")
+                                                               res <- sub(res, pattern="[|].*", replacement = "")
+                                                               return(res)
+                                                             }
+                                                          })
+df_phospho$Protein.names_first <- df_phospho$Fasta.headers %>%  sapply(FUN=function(text){
+                                                             if (text == "") return("")
+                                                             if (grepl(text, pattern="sp[|]")){
+                                                               ind_sp <- regexpr(text, pattern="sp[|]")
+                                                               if (ind_sp == 1){
+                                                                 res <- sub(text, pattern = "sp[|]", replacement = "")
+                                                               } else{
+                                                                 res <- sub(text, pattern = ".*sp[|]", replacement = "")
+                                                               }
+                                                               res <- sub(res, pattern="[|].*", replacement = "")
+                                                               return(res)
+                                                             } else{
+                                                               res <- sub(text, pattern = "tr[|]", replacement = "")
+                                                               res <- sub(res, pattern="[|].*", replacement = "")
+                                                               return(res)
+                                                             }
+                                                          })
+
+
+
+## Define background lists
+background_list_symbol <- c(df_prot$Gene.names_first, df_phospho$Gene.names_first, df_acet$Gene.names_first) %>% unique()
+backgroud_list_uniprot <- c(df_prot$Protein.names_first, df_phospho$Protein.names_first, df_acet$Protein.names_first) %>% unique()
+background_list_entrez <- mapIds(mouse, keys = backgroud_list_uniprot, keytype = "UNIPROT", column = "ENTREZID", multiVals="first") %>% unlist() %>% na.omit() %>% unique()
+
+```
+
+
+
+```{r Test against GO terms using clusterProfiler}
+
+## Read in libraries
+library(msigdbr)
+library(clusterProfiler)
+library(enrichplot)
+library(DOSE)
+library(org.Mm.eg.db)
+mouse <- org.Mm.eg.db
+
+
+## Create query list. Result: Per cluster, the list should contain 1 character vector of ENTREZ ids. 
+list_clusters <- list()
+for (i in 1:max(df_clusters$Clusters)){
+  
+  # filter for cluster i
+  df_clusters_i <- df_clusters %>% filter(Clusters == i)
+  
+  # extract unique ENTREZ ids for cluster i
+  ENTREZ_i <- df_clusters_i$entrezID %>% na.omit()
+  
+  # store in list
+  list_clusters[[i]] <- ENTREZ_i
+  names(list_clusters)[i] <- paste0(selected_clusters_ORA, "_cluster",i)
+}
+
+
+## Perform ORA against GO terms
+par(mfrow=c(1,1))
+GO_enrichment <- compareCluster(list_clusters, fun="enrichGO", ont = "ALL",  OrgDb=mouse,  pvalueCutoff = 10, universe = background_list_entrez, maxGSSize=250, qvalueCutoff=10, minGSSize=3)
+GO_res <- GO_enrichment@compareClusterResult
+GO_res$Description <- paste0(GO_res$ONTOLOGY, ": ", GO_res$Description) # paste Ontology to Description column
+GO_res <- GO_res[,!names(GO_res) == "ONTOLOGY"] # remove Ontology column
+rownames(GO_res) <- NULL
+
+
+## Perform ORA against KEGG terms
+KEGG_enrichment <- compareCluster(list_clusters, fun="enrichKEGG",  organism="mmu",  pvalueCutoff = 10, qvalueCutoff= 10, universe = background_list_entrez)
+KEGG_res <- KEGG_enrichment@compareClusterResult
+KEGG_res$Description <- paste0("KEGG: ", KEGG_res$Description)
+rownames(KEGG_res) <- NULL
+
+
+## Perform ORA against Hallmark gene sets from MSigDB (needs loop)
+library(msigdbr)
+list_hallmarks <- list()  # initiate object to fill
+df_msig_h <- msigdbr(species = "Mus musculus", category = "H") %>%   # extract mouse hallmark gene sets (as entrez IDs)
+    dplyr::select(gs_name, entrez_gene) %>%
+    dplyr::rename(ont = gs_name, gene = entrez_gene) %>% as.data.frame()
+for (i in 1:length(list_clusters)){
+  Hallmark_res <- enricher(gene = list_clusters[[i]], universe = background_list_entrez, TERM2GENE = df_msig_h,
+                                  pvalueCutoff = 10, qvalueCutoff = 10) %>% as.data.frame()
+  df_add <- data.frame(rep(names(list_clusters)[i], times=nrow(Hallmark_res)))
+  names(df_add) = "Cluster"
+  Hallmark_res <- cbind(df_add,Hallmark_res)
+  list_hallmarks[[i]] <- Hallmark_res
+}
+Hallmark_res <- do.call(what=rbind, args=list_hallmarks)
+rownames(Hallmark_res) <- NULL
+
+
+## Rowbind all enrichment results
+cbind(GOres_names = names(GO_res), Keggres_names = names(KEGG_res), Hallmarkres_names = names(Hallmark_res))  # check if names are equal
+TotalEnrichment_res <- rbind(GO_res, KEGG_res, Hallmark_res)
+
+
+## Remove adjusted p-value and q-value columns
+TotalEnrichment_res <- TotalEnrichment_res[,!names(TotalEnrichment_res) %in% c("p.adjust", "qvalue")]
+
+
+## Calculate adjusted p-values again (note that we have so far not removed any enrichment result! The p-value and q-value filter settings above were all-permissive)
+TotalEnrichment_res$adj.pvalue <- p.adjust(TotalEnrichment_res$pvalue, method="BH")
+TotalEnrichment_res$Significant_FDR <- ifelse(TotalEnrichment_res$adj.pvalue <= 0.05, yes="+", no="-")
+table(TotalEnrichment_res$Significant_FDR, TotalEnrichment_res$Cluster)
+
+
+## Reorder columns
+v_newOrder <- c("Cluster", "ID", "Description", "GeneRatio", "BgRatio", "pvalue", "adj.pvalue", "Significant_FDR", "geneID", "Count")
+TotalEnrichment_res <- TotalEnrichment_res[,v_newOrder]
+
+
+## Store results (all terms and only significant)
+TotalEnrichment_res_sig <- TotalEnrichment_res %>% filter(Significant_FDR == "+")
+write.table(TotalEnrichment_res, file=paste0(wd,"/Results/ORA_resultTable_allTerms.txt"), row.names = FALSE, col.names = TRUE, quote=FALSE, sep="\t")
+write.table(TotalEnrichment_res_sig, file=paste0(wd,"/Results/ORA_resultTable_sigTerms.txt"), row.names = FALSE, col.names = TRUE, quote=FALSE, sep="\t")
+
+
+```
+
+
+
+```{r Visualize Top enrichment results per cluster}
+
+## Select the top number of terms to be shown per cluster
+topNumber <- 3
+
+
+## Filter enrichment results based on p.adjust <= 0.1
+df_gg <- TotalEnrichment_res %>% filter(adj.pvalue<= 0.1)
+
+
+## For each Cluster, find the top enriched terms and save in vector
+v_topTerms <- character(0)
+for (i in unique(df_gg$Cluster)){
+  df_gg_i <- df_gg %>% filter(Cluster == i)
+  df_gg_i <- df_gg_i[order(df_gg_i$adj.pvalue),]
+  v_topTerms <- c(v_topTerms, df_gg_i$Description[1:topNumber])
+}
+
+
+## Subselect for terms that are the top terms per cluster. Shorten description to limited number of characters
+df_gg_topTerms <- df_gg[df_gg$Description %in% v_topTerms,]
+df_gg_topTerms$Description %>% nchar()
+df_gg_topTerms$Description <- df_gg_topTerms$Description %>% substring(., first=1, last=60)
+df_gg_topTerms$Description %>% as.character() %>% table()
+df_gg_topTerms$Description <- factor(df_gg_topTerms$Description, levels=rev(unique(df_gg_topTerms$Description)))
+
+
+## Calculate gene ratio, background ratio and enrichment factor. Cap enrichment factor at 20
+denominator = sub(df_gg_topTerms$GeneRatio, pattern=".*/", replacement = "") %>% as.numeric
+numerator = sub(df_gg_topTerms$GeneRatio, pattern="/.*", replacement = "") %>% as.numeric
+df_gg_topTerms$Gene_Ratio = numerator/denominator
+denominator = sub(df_gg_topTerms$BgRatio, pattern=".*/", replacement = "") %>% as.numeric
+numerator = sub(df_gg_topTerms$BgRatio, pattern="/.*", replacement = "") %>% as.numeric
+df_gg_topTerms$Background_Ratio = numerator/denominator
+df_gg_topTerms$EnrichmentFactor = df_gg_topTerms$Gene_Ratio/df_gg_topTerms$Background_Ratio
+df_gg_topTerms$EnrichmentFactor <- pmin(20, df_gg_topTerms$EnrichmentFactor)
+
+
+## Plot ggplot of top terms
+library("viridis")
+gg <- ggplot(data=df_gg_topTerms) +
+            geom_point(aes(x=Cluster, y=Description, col=adj.pvalue, size=EnrichmentFactor)) +
+            theme_bw() + scale_color_viridis(option="viridis",limits=c(0, 0.1), direction=1, end = 1, begin=0) + ylab("Gene set name")
+ggsave(plot=gg, filename = "Results/Dotplot_EnrichmentRes_TopTerms.pdf", height = 4,width = 7)
+
+```
+
+
+
+
+
+
+
+
+```{r}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

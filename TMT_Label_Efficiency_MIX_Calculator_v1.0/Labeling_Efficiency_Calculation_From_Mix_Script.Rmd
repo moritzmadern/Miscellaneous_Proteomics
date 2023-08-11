@@ -31,13 +31,6 @@ library("MSnbase")
 library("ez")
 setMSnbaseVerbose(FALSE)
 
-TMT16 <- new("ReporterIons", name="TMT16plex",
-             reporterNames=c("126C", "127N","127C", "128N", "128C", "129N", "129C", "130N", "130C", "131N", "131C", "132N", "132C", "133N", "133C", "134N"),
-             mz=c(126.127726, 127.124761, 127.131081, 128.128116, 128.134436, 129.131471, 129.13779, 130.134825, 130.141145, 131.13818, 131.14450, 132.141535, 132.147855, 133.14489, 133.15121, 134.148245),
-             width=0.002,
-             col=rainbow(16))
-
-
 
 ```
 
@@ -49,15 +42,15 @@ TMT16 <- new("ReporterIons", name="TMT16plex",
 # PLEASE READ THE USERGUIDE CAREFULLY. SPECIFYING PARAMETERS INCORRECTLY WILL RESULT IN ERRORS.
 
 # specify working directory
-wd <- "X:\\Wolfgang\\Terka 1\\labeling eff_cv45"
+wd <-""
 setwd(wd)
 writeLines("files in working directory:")
 list.files()
 
 
-# specify file names
-mzml_file <- "X:\\Wolfgang\\Terka 1\\labeling eff_cv45\\20210621_E2_RSLC2_Reiter_Hartl_UW_MPL_label_eff_black.mzML"
-msms.txt_file <-"X:\\Wolfgang\\Terka 1\\labeling eff_cv45\\msms.txt"
+# specify file path
+mzml_file <- ""
+msms.txt_file <-""
 
 
 # specify which reporter ions you have in your experiment
@@ -98,6 +91,7 @@ score_cutoff <- 0.1
 
 
 ```{r    C) READ IN ID DATA (MSMS.TXT) }
+
 # Read in ID (msms.txt) file. This file should be the result of a MQ search
 df_id <- read.delim(file=msms.txt_file, sep="\t", stringsAsFactors = FALSE)
 dim(df_id)
