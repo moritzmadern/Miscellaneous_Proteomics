@@ -211,7 +211,7 @@ df$Gene.names_first <- df$Gene.names %>%  sapply(FUN=function(text){
                                                           bool_Gm <- grepl(res, pattern="^Gm")
                                                           bool_empty <- res == ""
                                                           res_ideal <- res[!(bool_Gm) &  !bool_empty ]
-                                                          if (length(res_ideal) > 1){
+                                                          if (length(res_ideal) >= 1){
                                                             return(res_ideal[1])
                                                           } else { return(res[1]) }
                                                         }
