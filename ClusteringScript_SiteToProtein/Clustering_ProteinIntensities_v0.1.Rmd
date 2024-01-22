@@ -857,7 +857,7 @@ df_prot$Gene.names_first <- df_prot$Gene.names %>%  sapply(FUN=function(text){
                                                           bool_Gm <- grepl(res, pattern="^Gm")
                                                           bool_empty <- res == ""
                                                           res_ideal <- res[!(bool_Gm) &  !bool_empty ]
-                                                          if (length(res_ideal) > 1){
+                                                          if (length(res_ideal) >= 1){
                                                             return(res_ideal[1])
                                                           } else { return(res[1]) }
                                                         }
@@ -873,7 +873,7 @@ df_acet$Gene.names_first <- df_acet$Gene.names %>%  sapply(FUN=function(text){
                                                           bool_Gm <- grepl(res, pattern="^Gm")
                                                           bool_empty <- res == ""
                                                           res_ideal <- res[!(bool_Gm) &  !bool_empty ]
-                                                          if (length(res_ideal) > 1){
+                                                          if (length(res_ideal) >= 1){
                                                             return(res_ideal[1])
                                                           } else { return(res[1]) }
                                                         }
@@ -889,7 +889,7 @@ df_phospho$Gene.names_first <- df_phospho$Gene.names %>%  sapply(FUN=function(te
                                                           bool_Gm <- grepl(res, pattern="^Gm")
                                                           bool_empty <- res == ""
                                                           res_ideal <- res[!(bool_Gm) &  !bool_empty ]
-                                                          if (length(res_ideal) > 1){
+                                                          if (length(res_ideal) >= 1){
                                                             return(res_ideal[1])
                                                           } else { return(res[1]) }
                                                         }
